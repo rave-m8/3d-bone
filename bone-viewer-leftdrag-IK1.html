@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>glTF ビューワー（1リンクIK：親のみ回転・Undo/Redo）</title>
+<title>glTF ビューワー</title>
 <style>
   html,body{height:100%;margin:0;background:#0b1020;color:#e5e7eb;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP","Meiryo",sans-serif}
   #app{display:grid;grid-template-rows:auto 1fr;height:100%}
@@ -32,13 +32,6 @@
 <body>
 <div id="app">
   <header>
-    <div class="title">glTF ビューワー
-      <span class="tag">gltf/glb + 外部.bin</span>
-      <span class="tag">テクスチャ無視</span>
-      <span class="tag">左=子ドラッグ→親回転（長さ固定）</span>
-      <span class="tag">中=パン / 右=回転</span>
-      <span class="tag">Undo: Ctrl/Cmd+Z / Redo: Ctrl+Y or Ctrl/Cmd+Shift+Z</span>
-    </div>
     <label title=".gltf/.glb（gltfは.binと同フォルダ）を選択">
       <input id="filesFolder" type="file" multiple webkitdirectory />
       フォルダ選択
@@ -47,8 +40,8 @@
       <input id="filesFiles" type="file" multiple accept=".gltf,.glb,.bin,.png,.jpg,.jpeg,.webp,.ktx2,.ktx,.bmp,.gif,.tga" />
       ファイル選択
     </label>
-    <button id="btnUndo" disabled>元に戻す (Ctrl/Cmd+Z)</button>
-    <button id="btnRedo" disabled>やり直す (Ctrl+Y / ⇧+Ctrl/Cmd+Z)</button>
+    <button id="btnUndo" disabled>元に戻す</button>
+    <button id="btnRedo" disabled>やり直す</button>
   </header>
 
   <div id="viewport" style="position:relative;">
@@ -363,12 +356,62 @@ function setMouseNDC(ev){
   mouseNDC.x=((ev.clientX-r.left)/r.width)*2-1;
   mouseNDC.y=-((ev.clientY-r.top)/r.height)*2+1;
 }
+function pointSegmentDistSq2D(px,py,ax,ay,bx,by){
+  const abx=bx-ax, aby=by-ay;
+  const apx=px-ax, apy=py-ay;
+  const abLenSq=abx*abx+aby*aby;
+  if(abLenSq<1e-12) return apx*apx+apy*apy; // ほぼ点
+  const t=Math.max(0,Math.min(1,(apx*abx+apy*aby)/abLenSq));
+  const cx=ax+abx*t, cy=ay+aby*t;
+  const dx=px-cx, dy=py-cy;
+  return dx*dx+dy*dy;
+}
 function pickBoneByRay(ev){
   if(!bones.length) return null;
   setMouseNDC(ev);
   raycaster.setFromCamera(mouseNDC,camera);
   const hits=raycaster.intersectObjects(pickerGroup.children,false);
-  return hits?.[0]?.object?.userData?.bone || null;
+  if(hits?.length) return hits[0].object?.userData?.bone || null;
+
+  // フォールバック：線分（ボーン→子ボーン）をスクリーン座標で当たり判定し、「線分元のボーン」を返す
+  const rect=renderer.domElement.getBoundingClientRect();
+  const mx=ev.clientX-rect.left, my=ev.clientY-rect.top;
+  let bestBone=null, bestDistSq=Infinity;
+
+  bones.forEach(bone=>{
+    // 親がボーンでない場合は回転対象にならないのでスキップ
+    if(!bone.parent || !bone.parent.isBone) return;
+
+    let hasChildSegment=false;
+    bone.children.forEach(ch=>{
+      if(!ch.isBone) return;
+      hasChildSegment=true;
+
+      const p0=tmpA.copy(bone.getWorldPosition(tmpA)).project(camera);
+      const p1=tmpB.copy(ch.getWorldPosition(tmpB)).project(camera);
+      const x0=(p0.x*0.5+0.5)*rect.width, y0=(-p0.y*0.5+0.5)*rect.height;
+      const x1=(p1.x*0.5+0.5)*rect.width, y1=(-p1.y*0.5+0.5)*rect.height;
+
+      const distSq=pointSegmentDistSq2D(mx,my,x0,y0,x1,y1);
+      if(distSq<bestDistSq){
+        bestDistSq=distSq;
+        bestBone=bone;
+      }
+    });
+
+    // 子ボーンが無い場合は点距離で判定（ほぼ picker と同様の意味合い）
+    if(!hasChildSegment){
+      const p0=tmpA.copy(bone.getWorldPosition(tmpA)).project(camera);
+      const x0=(p0.x*0.5+0.5)*rect.width, y0=(-p0.y*0.5+0.5)*rect.height;
+      const distSq=(mx-x0)*(mx-x0)+(my-y0)*(my-y0);
+      if(distSq<bestDistSq){
+        bestDistSq=distSq;
+        bestBone=bone;
+      }
+    }
+  });
+
+  return (bestBone && bestDistSq<=pickPixelRadius*pickPixelRadius)? bestBone : null;
 }
 
 function beginDrag(ev,bone){
