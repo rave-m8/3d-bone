@@ -93,6 +93,10 @@ const chkShowPickers=document.getElementById("chkShowPickers");
 const btnUndo=document.getElementById("btnUndo");
 const btnRedo=document.getElementById("btnRedo");
 function log(...a){ logEl.textContent+=a.join(" ")+"\n"; logEl.scrollTop=logEl.scrollHeight; }
+const fmtV=(v)=>v?`(${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)})`:"(-)";
+const fmtQ=(q)=>q?`(${q.x.toFixed(4)},${q.y.toFixed(4)},${q.z.toFixed(4)},${q.w.toFixed(4)})`:"(-)";
+const fmtN=(n,d=4)=>n===undefined?"" : n.toFixed(d);
+const radToDeg=(r)=>r*180/Math.PI;
 
 /* ===== Three ===== */
 const renderer=new THREE.WebGLRenderer({ antialias:true, canvas, alpha:true });
@@ -129,7 +133,7 @@ const raycaster=new THREE.Raycaster(), mouseNDC=new THREE.Vector2();
 let modelRoot=new THREE.Group(); scene.add(modelRoot);
 
 /* IK 休止情報（Local & World 参照） */
-const ikMap=new Map(); // child -> { parent, restLen, restDirLocal, restUpLocal, parentRestLocalQ, restDirWorld, parentRestWorldQ }
+const ikMap=new Map(); // child -> { parent, restLen, restDirLocal, restUpLocal, parentRestLocalQ, restDirWorld, parentRestWorldQ, parentRestScale, parentRestScaleSign }
 
 /* ピッカー球 */
 const pickerGroup=new THREE.Group(); scene.add(pickerGroup);
@@ -272,7 +276,7 @@ function setupIKRestInfo(){
   ikMap.clear();
   if(!bones.length) return;
 
-  const pPos=new THREE.Vector3(), cPos=new THREE.Vector3(), pWQ=new THREE.Quaternion();
+  const pPos=new THREE.Vector3(), cPos=new THREE.Vector3(), pWQ=new THREE.Quaternion(), pScale=new THREE.Vector3();
 
   bones.forEach(child=>{
     const parent = child.parent && child.parent.isBone ? child.parent : null;
@@ -290,11 +294,15 @@ function setupIKRestInfo(){
     const dirW = cPos.clone().sub(pPos); const len = dirW.length();
     const restDirWorld = len>1e-8 ? dirW.clone().normalize() : new THREE.Vector3(0,1,0);
     parent.getWorldQuaternion(pWQ);
+    parent.getWorldScale(pScale);
+    const parentRestScaleSign = Math.sign(pScale.x*pScale.y*pScale.z) || 1;
 
     ikMap.set(child,{
       parent, restLen,
       restDirLocal, restUpLocal, parentRestLocalQ,
-      restDirWorld, parentRestWorldQ: pWQ.clone()
+      restDirWorld, parentRestWorldQ: pWQ.clone(),
+      parentRestScale: pScale.clone(),
+      parentRestScaleSign
     });
   });
 }
@@ -328,8 +336,42 @@ function pickerUpdate(){
 let isLeftDragging=false;
 let dragPlane=null, dragOffsetWorld=null, dragBone=null, dragInfo=null;
 let dragLastDirLocal=new THREE.Vector3();
+let dragPrevDirLocal=null;
 const tmpV=new THREE.Vector3(), pw=new THREE.Vector3(), tmpA=new THREE.Vector3(), tmpB=new THREE.Vector3();
 const tmpQ=new THREE.Quaternion();
+const tmpScale=new THREE.Vector3();
+const tmpQWorld=new THREE.Quaternion();
+let dragLogCounter=0, lastDragLogTime=0;
+const DRAG_LOG_LIMIT=200;
+function logDragDebug(tag,info){
+  const now=performance.now();
+  if(dragLogCounter>=DRAG_LOG_LIMIT) return;
+  if(now-lastDragLogTime<25) return; // 短時間の連打を抑制
+  dragLogCounter++; lastDragLogTime=now;
+  const msg=[
+    `[drag ${dragLogCounter}] ${tag}`,
+    info.boneName?`bone=${info.boneName}`:"",
+    info.restDir?`rest=${fmtV(info.restDir)}`:"",
+    info.newDir?`new=${fmtV(info.newDir)}`:"",
+    info.qDelta?`qΔ=${fmtQ(info.qDelta)}`:"",
+    info.parentQ?`parentQ=${fmtQ(info.parentQ)}`:"",
+    info.dot!==undefined?`dot=${fmtN(info.dot)}`:"",
+    info.len!==undefined?`len=${fmtN(info.len)}`:"",
+    info.deltaDeg!==undefined?`deg=${fmtN(info.deltaDeg,2)}`:"",
+    info.targetW?`hitW=${fmtV(info.targetW)}`:"",
+    info.planeN?`planeN=${fmtV(info.planeN)}`:"",
+    info.offsetLen!==undefined?`offLen=${fmtN(info.offsetLen,3)}`:"",
+    info.dirW?`dirW=${fmtV(info.dirW)}`:"",
+    info.dirWRaw?`dirWRaw=${fmtV(info.dirWRaw)}`:"",
+    info.diffL?`diffL=${fmtV(info.diffL)}`:"",
+    info.p0L?`p0L=${fmtV(info.p0L)}`:"",
+    info.p1L?`p1L=${fmtV(info.p1L)}`:"",
+    info.parentScale?`pScale=${fmtV(info.parentScale)}`:"",
+    info.parentDet!==undefined?`pDet=${fmtN(info.parentDet,3)}`:"",
+    info.parentWQ?`pWQ=${fmtQ(info.parentWQ)}`:""
+  ].filter(Boolean).join(" ");
+  log(msg);
+}
 
 function quatFromDirsStable(from,to,fallbackUp){
   const a=tmpA.copy(from).normalize();
@@ -422,6 +464,8 @@ function beginDrag(ev,bone){
   dragBone=bone;
   dragInfo=ikMap.get(bone);
   dragLastDirLocal.copy(dragInfo?.restDirLocal||new THREE.Vector3(0,1,0));
+  dragLogCounter=0; lastDragLogTime=0;
+  dragPrevDirLocal=null;
 
   // 1操作のスナップショット（before）
   currentAction = { before: poseSnapshot(), after: null, note:`ドラッグ: ${bone.name||"(no name)"}` };
@@ -444,6 +488,13 @@ function beginDrag(ev,bone){
 
   const idx=bones.indexOf(bone); if(idx>=0){ boneSelect.value=String(idx); selectedBone=bone; }
   log("ドラッグ開始:", bone.name||"(no name)");
+  if(dragInfo){
+    logDragDebug("start",{
+      boneName:bone.name||"(no name)",
+      restDir:dragInfo.restDirLocal,
+      parentQ:dragInfo.parentRestLocalQ
+    });
+  }
 }
 
 function dragMove(ev){
@@ -459,19 +510,23 @@ function dragMove(ev){
   dragInfo.parent.getWorldPosition(pw);
 
   // 目標方向（World）
-  const newDirWorld = hit.add(dragOffsetWorld.clone()).sub(pw);
+  const newDirWorldRaw = hit.clone().add(dragOffsetWorld).sub(pw);
+  const newDirWorld = newDirWorldRaw.clone();
   if(newDirWorld.lengthSq()<1e-12) return;
   newDirWorld.normalize();
 
-  // World→親ローカル方向を 2点の差分で厳密に
-  const p0_local = dragInfo.parent.worldToLocal(pw.clone());
-  const p1_local = dragInfo.parent.worldToLocal(pw.clone().add(newDirWorld));
-  const diffLocal = p1_local.sub(p0_local);
-  const lenLocal = diffLocal.length();
+  // World方向を休止時の親ワールド回転の逆でローカルへ（スケール符号のみ反映）
+  const invParentRestWQ = dragInfo.parentRestWorldQ.clone().invert();
+  const restScaleSign = dragInfo.parentRestScaleSign || 1;
+
+  const newDirLocalRaw = newDirWorld.clone().applyQuaternion(invParentRestWQ);
+  if(restScaleSign<0) newDirLocalRaw.negate();
+
+  const lenLocal = newDirLocalRaw.length();
   const newDirLocal = lenLocal<1e-5
     ? dragLastDirLocal.clone()
-    : diffLocal.normalize();
-  if(lenLocal>=1e-5) dragLastDirLocal.copy(newDirLocal);
+    : newDirLocalRaw.normalize();
+  dragLastDirLocal.copy(newDirLocal);
 
   // 親ローカル回転差：restDirLocal → newDirLocal（180度反転を安定化）
   const qDeltaLocal = quatFromDirsStable(dragInfo.restDirLocal, newDirLocal, dragInfo.restUpLocal);
@@ -483,6 +538,32 @@ function dragMove(ev){
   dragInfo.parent.updateMatrixWorld(true);
   dragBone.updateMatrixWorld(true);
   pickerUpdate();
+
+  // デバッグログ（間欠）
+  const deltaDeg = dragPrevDirLocal
+    ? radToDeg(Math.acos(THREE.MathUtils.clamp(dragPrevDirLocal.dot(newDirLocal),-1,1)))
+    : 0;
+  const tag = deltaDeg>5 ? "jump" : "move";
+  const parentDet=dragInfo.parent.matrixWorld.determinant();
+  logDragDebug(tag,{
+    boneName:dragBone.name||"(no name)",
+    restDir:dragInfo.restDirLocal,
+    newDir:newDirLocal,
+    qDelta:qDeltaLocal,
+    parentQ:dragInfo.parent.quaternion,
+    parentWQ:dragInfo.parentRestWorldQ,
+    parentScale:dragInfo.parentRestScale,
+    parentDet,
+    dot:dragInfo.restDirLocal.dot(newDirLocal),
+    len:lenLocal,
+    deltaDeg,
+    targetW:hit,
+    planeN:dragPlane.normal,
+    offsetLen:dragOffsetWorld.length(),
+    dirW:newDirWorld,
+    dirWRaw:newDirWorldRaw
+  });
+  dragPrevDirLocal=newDirLocal.clone();
 }
 
 function endDrag(ev){
@@ -497,7 +578,12 @@ function endDrag(ev){
     currentAction=null;
   }
 
-  dragBone=null; dragPlane=null; dragOffsetWorld=null; dragInfo=null;
+  logDragDebug("end",{
+    boneName:dragBone?.name||"(no name)",
+    parentQ:dragInfo?.parent?.quaternion,
+    restDir:dragInfo?.restDirLocal
+  });
+  dragBone=null; dragPlane=null; dragOffsetWorld=null; dragInfo=null; dragPrevDirLocal=null;
 }
 
 /* ===== 入力（マウス） ===== */
