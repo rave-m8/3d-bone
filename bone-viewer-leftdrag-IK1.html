@@ -33,15 +33,19 @@
 <div id="app">
   <header>
     <div class="title">glTF ビューワー
-      <span class="tag">gltf + 外部.bin</span>
+      <span class="tag">gltf/glb + 外部.bin</span>
       <span class="tag">テクスチャ無視</span>
       <span class="tag">左=子ドラッグ→親回転（長さ固定）</span>
       <span class="tag">中=パン / 右=回転</span>
       <span class="tag">Undo: Ctrl/Cmd+Z / Redo: Ctrl+Y or Ctrl/Cmd+Shift+Z</span>
     </div>
-    <label title=".gltf と .bin を同フォルダで選択">
-      <input id="files" type="file" multiple webkitdirectory />
-      フォルダ/ファイル選択
+    <label title=".gltf/.glb（gltfは.binと同フォルダ）を選択">
+      <input id="filesFolder" type="file" multiple webkitdirectory />
+      フォルダ選択
+    </label>
+    <label title=".gltf/.glb 単体または複数ファイル選択">
+      <input id="filesFiles" type="file" multiple accept=".gltf,.glb,.bin,.png,.jpg,.jpeg,.webp,.ktx2,.ktx,.bmp,.gif,.tga" />
+      ファイル選択
     </label>
     <button id="btnUndo" disabled>元に戻す (Ctrl/Cmd+Z)</button>
     <button id="btnRedo" disabled>やり直す (Ctrl+Y / ⇧+Ctrl/Cmd+Z)</button>
@@ -86,7 +90,8 @@ addEventListener('unhandledrejection',e=>showErr(e.reason?.message||e.reason||'U
 
 /* ===== DOM ===== */
 const canvas=document.getElementById("canvas");
-const filesInput=document.getElementById("files");
+const filesInputFolder=document.getElementById("filesFolder");
+const filesInputFiles=document.getElementById("filesFiles");
 const panel=document.getElementById("panel");
 const logEl=document.getElementById("log");
 const boneSelect=document.getElementById("boneSelect");
@@ -131,7 +136,7 @@ const raycaster=new THREE.Raycaster(), mouseNDC=new THREE.Vector2();
 let modelRoot=new THREE.Group(); scene.add(modelRoot);
 
 /* IK 休止情報（Local & World 参照） */
-const ikMap=new Map(); // child -> { parent, restLen, restDirLocal, parentRestLocalQ, restDirWorld, parentRestWorldQ }
+const ikMap=new Map(); // child -> { parent, restLen, restDirLocal, restUpLocal, parentRestLocalQ, restDirWorld, parentRestWorldQ }
 
 /* ピッカー球 */
 const pickerGroup=new THREE.Group(); scene.add(pickerGroup);
@@ -203,17 +208,23 @@ function handleResize(){
 addEventListener("resize", handleResize);
 
 /* ===== 読み込み ===== */
-filesInput.addEventListener("change",(e)=>{
+const onFilesSelected=(e)=>{
   const list=e.target.files; if(!list?.length) return;
   loadFromFileList(list).catch(showErr);
-});
+};
+filesInputFolder.addEventListener("change", onFilesSelected);
+filesInputFiles.addEventListener("change", onFilesSelected);
 async function loadFromFileList(fileList){
   clearModel();
 
   const files=Array.from(fileList);
   const gltfFile=files.find(f=>/\.gltf$/i.test(f.name));
-  if(!gltfFile){ alert(".gltf が見つかりません"); return; }
-  const basePath=(gltfFile.webkitRelativePath||gltfFile.name).replace(/\\/g,"/");
+  const glbFile=files.find(f=>/\.glb$/i.test(f.name));
+  const mainFile=gltfFile||glbFile;
+  if(!mainFile){ alert(".gltf または .glb が見つかりません"); return; }
+  const isGLB=/\.glb$/i.test(mainFile.name);
+
+  const basePath=(mainFile.webkitRelativePath||mainFile.name).replace(/\\/g,"/");
   const baseDir=basePath.includes("/")? basePath.slice(0,basePath.lastIndexOf("/")):"";
   for(const f of files){
     const full=(f.webkitRelativePath||f.name).replace(/\\/g,"/");
@@ -223,9 +234,9 @@ async function loadFromFileList(fileList){
     [full,rel,"./"+rel,name,"./"+name,full.toLowerCase(),rel.toLowerCase(),name.toLowerCase()].forEach(k=>filesMap.set(k,url));
   }
 
-  const text=await gltfFile.text();
+  const content=isGLB? await mainFile.arrayBuffer() : await mainFile.text();
   await new Promise((res,rej)=>{
-    loader.parse(text,"",(gltf)=>{
+    loader.parse(content,"",(gltf)=>{
       model=gltf.scene||gltf.scenes?.[0];
       modelRoot.add(model);
 
@@ -277,6 +288,7 @@ function setupIKRestInfo(){
     // Local（親ローカル）
     const restLen = child.position.length();
     const restDirLocal = restLen>1e-8 ? child.position.clone().normalize() : new THREE.Vector3(0,1,0);
+    const restUpLocal = Math.abs(restDirLocal.y)<0.9 ? new THREE.Vector3(0,1,0) : new THREE.Vector3(1,0,0); // 180度反転時の安定軸
     const parentRestLocalQ = parent.quaternion.clone();
 
     // World（参考）
@@ -288,7 +300,7 @@ function setupIKRestInfo(){
 
     ikMap.set(child,{
       parent, restLen,
-      restDirLocal, parentRestLocalQ,
+      restDirLocal, restUpLocal, parentRestLocalQ,
       restDirWorld, parentRestWorldQ: pWQ.clone()
     });
   });
@@ -322,7 +334,29 @@ function pickerUpdate(){
 /* ===== 左ドラッグ（親のみ回転・World→LocalをworldToLocalで厳密変換） ===== */
 let isLeftDragging=false;
 let dragPlane=null, dragOffsetWorld=null, dragBone=null, dragInfo=null;
-const tmpV=new THREE.Vector3(), pw=new THREE.Vector3();
+let dragLastDirLocal=new THREE.Vector3();
+const tmpV=new THREE.Vector3(), pw=new THREE.Vector3(), tmpA=new THREE.Vector3(), tmpB=new THREE.Vector3();
+const tmpQ=new THREE.Quaternion();
+
+function quatFromDirsStable(from,to,fallbackUp){
+  const a=tmpA.copy(from).normalize();
+  const b=tmpB.copy(to).normalize();
+  const dot=a.dot(b);
+  if(dot>0.999999) return tmpQ.identity(); // ほぼ同方向
+  if(dot<-0.999999){
+    // 反転時：fromと十分非平行な軸を選び、180度回転
+    const axis=tmpA.copy(fallbackUp||new THREE.Vector3(0,1,0));
+    if(Math.abs(axis.dot(a))>0.9) axis.set(1,0,0);
+    axis.cross(a).normalize();
+    return tmpQ.setFromAxisAngle(axis, Math.PI);
+  }
+  // 一般ケース：安定計算（setFromUnitVectors相当だが符号揺れを抑制）
+  const s=Math.sqrt((1+dot)*2);
+  const invS=1/s;
+  const axis=tmpA.crossVectors(a,b);
+  tmpQ.set(axis.x*invS, axis.y*invS, axis.z*invS, s*0.5);
+  return tmpQ.normalize();
+}
 
 function setMouseNDC(ev){
   const r=renderer.domElement.getBoundingClientRect();
@@ -344,6 +378,7 @@ function beginDrag(ev,bone){
 
   dragBone=bone;
   dragInfo=ikMap.get(bone);
+  dragLastDirLocal.copy(dragInfo?.restDirLocal||new THREE.Vector3(0,1,0));
 
   // 1操作のスナップショット（before）
   currentAction = { before: poseSnapshot(), after: null, note:`ドラッグ: ${bone.name||"(no name)"}` };
@@ -388,10 +423,15 @@ function dragMove(ev){
   // World→親ローカル方向を 2点の差分で厳密に
   const p0_local = dragInfo.parent.worldToLocal(pw.clone());
   const p1_local = dragInfo.parent.worldToLocal(pw.clone().add(newDirWorld));
-  const newDirLocal = p1_local.sub(p0_local).normalize();
+  const diffLocal = p1_local.sub(p0_local);
+  const lenLocal = diffLocal.length();
+  const newDirLocal = lenLocal<1e-5
+    ? dragLastDirLocal.clone()
+    : diffLocal.normalize();
+  if(lenLocal>=1e-5) dragLastDirLocal.copy(newDirLocal);
 
-  // 親ローカル回転差：restDirLocal → newDirLocal
-  const qDeltaLocal = new THREE.Quaternion().setFromUnitVectors(dragInfo.restDirLocal, newDirLocal);
+  // 親ローカル回転差：restDirLocal → newDirLocal（180度反転を安定化）
+  const qDeltaLocal = quatFromDirsStable(dragInfo.restDirLocal, newDirLocal, dragInfo.restUpLocal);
   dragInfo.parent.quaternion.copy(dragInfo.parentRestLocalQ.clone().multiply(qDeltaLocal));
 
   // 子の position は休止値（方向×長さ）に固定
