@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>glTF ビューワー（1リンクIK：親のみ回転・Undo/Redo）</title>
+<title>glTF ビューワー</title>
 <style>
   html,body{height:100%;margin:0;background:#0b1020;color:#e5e7eb;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP","Meiryo",sans-serif}
   #app{display:grid;grid-template-rows:auto 1fr;height:100%}
@@ -32,13 +32,6 @@
 <body>
 <div id="app">
   <header>
-    <div class="title">glTF ビューワー
-      <span class="tag">gltf/glb + 外部.bin</span>
-      <span class="tag">テクスチャ無視</span>
-      <span class="tag">左=子ドラッグ→親回転（長さ固定）</span>
-      <span class="tag">中=パン / 右=回転</span>
-      <span class="tag">Undo: Ctrl/Cmd+Z / Redo: Ctrl+Y or Ctrl/Cmd+Shift+Z</span>
-    </div>
     <label title=".gltf/.glb（gltfは.binと同フォルダ）を選択">
       <input id="filesFolder" type="file" multiple webkitdirectory />
       フォルダ選択
@@ -47,8 +40,8 @@
       <input id="filesFiles" type="file" multiple accept=".gltf,.glb,.bin,.png,.jpg,.jpeg,.webp,.ktx2,.ktx,.bmp,.gif,.tga" />
       ファイル選択
     </label>
-    <button id="btnUndo" disabled>元に戻す (Ctrl/Cmd+Z)</button>
-    <button id="btnRedo" disabled>やり直す (Ctrl+Y / ⇧+Ctrl/Cmd+Z)</button>
+    <button id="btnUndo" disabled>元に戻す</button>
+    <button id="btnRedo" disabled>やり直す</button>
   </header>
 
   <div id="viewport" style="position:relative;">
