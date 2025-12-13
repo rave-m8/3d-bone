@@ -653,7 +653,8 @@ function startGyro(){
     const now=performance.now();
     if(now-gyroLogAt>=300){
       gyroLogAt=now;
-      log(`gyro α=${fmtN(e.alpha,1)} β=${fmtN(e.beta,1)} γ=${fmtN(e.gamma,1)}`);
+      const rot=camera.rotation;
+      log(`gyro α=${fmtN(e.alpha,1)} β=${fmtN(e.beta,1)} γ=${fmtN(e.gamma,1)} | cam rot(deg) x=${fmtN(radToDeg(rot.x),1)} y=${fmtN(radToDeg(rot.y),1)} z=${fmtN(radToDeg(rot.z),1)}`);
     }
   };
   addEventListener("deviceorientation", gyroHandler);
