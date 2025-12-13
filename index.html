@@ -614,7 +614,7 @@ btnRedo.addEventListener("click", redo);
 
 /* ===== ジャイロ：相対回転でカメラ制御 ===== */
 let gyroActive=false, gyroHandler=null, gyroLogAt=0;
-let gyroBaseQ=null, gyroBaseCamQ=null;
+let gyroBaseQ=null, gyroBaseCamQ=null, gyroBaseOffset=null, gyroBaseTarget=null;
 const zee=new THREE.Vector3(0,0,1);
 const euler=new THREE.Euler();
 const q0=new THREE.Quaternion();
@@ -645,10 +645,17 @@ function startGyro(){
     if(!gyroBaseQ){
       gyroBaseQ=gyroQ.clone();
       gyroBaseCamQ=camera.quaternion.clone();
+      gyroBaseOffset=camera.position.clone().sub(controls.target);
+      gyroBaseTarget=controls.target.clone();
       log("ジャイロ基準取得");
     }
     const delta = gyroBaseQ.clone().invert().multiply(gyroQ);
-    camera.quaternion.copy(delta.multiply(gyroBaseCamQ));
+    const newQ = delta.multiply(gyroBaseCamQ);
+    const offsetRotated = gyroBaseOffset.clone().applyQuaternion(delta);
+    camera.position.copy(gyroBaseTarget).add(offsetRotated);
+    camera.quaternion.copy(newQ);
+    camera.updateMatrixWorld(true);
+    controls.target.copy(gyroBaseTarget);
     camera.updateMatrixWorld(true);
     const now=performance.now();
     if(now-gyroLogAt>=300){
@@ -667,7 +674,7 @@ function stopGyro(){
   if(!gyroActive) return;
   removeEventListener("deviceorientation", gyroHandler);
   gyroActive=false;
-  gyroBaseQ=null; gyroBaseCamQ=null;
+  gyroBaseQ=null; gyroBaseCamQ=null; gyroBaseOffset=null; gyroBaseTarget=null;
   controls.enabled=true;
   btnGyro.textContent="ジャイロ開始";
   log("ジャイロリスナー停止");
