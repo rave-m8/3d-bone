@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>glTF ビューワー（1リンクIK：親のみ回転・Undo/Redo）</title>
+<style>
+  html,body{height:100%;margin:0;background:#0b1020;color:#e5e7eb;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP","Meiryo",sans-serif}
+  #app{display:grid;grid-template-rows:auto 1fr;height:100%}
+  header{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;padding:10px;background:#0f172a}
+  .title{font-weight:700}
+  #canvas{width:100%;height:100%;display:block;touch-action:none}
+  .panel{position:absolute;top:12px;right:12px;min-width:340px;max-width:46vw;background:rgba(15,23,42,.9);padding:12px;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,.35)}
+  .row{display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:8px}
+  select,button,input[type="range"],label{border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;padding:6px 8px}
+  button:disabled{opacity:.5}
+  .log{font:12px/1.4 ui-monospace,Consolas,Menlo,monospace;white-space:pre-wrap;background:#0b1222;border:1px solid #334155;border-radius:8px;padding:8px;max-height:28vh;overflow:auto}
+  .tag{font-size:12px;padding:2px 6px;border:1px solid #334155;border-radius:999px;color:#cbd5e1}
+  #err{position:fixed;left:12px;bottom:12px;max-width:56vw;background:#7f1d1d;color:#fecaca;padding:8px 10px;border-radius:8px;font:12px/1.4 ui-monospace;display:none;white-space:pre-wrap}
+  .cursor-move{cursor:move}
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.1/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.1/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="title">glTF ビューワー
+      <span class="tag">gltf + 外部.bin</span>
+      <span class="tag">テクスチャ無視</span>
+      <span class="tag">左=子ドラッグ→親回転（長さ固定）</span>
+      <span class="tag">中=パン / 右=回転</span>
+      <span class="tag">Undo: Ctrl/Cmd+Z / Redo: Ctrl+Y or Ctrl/Cmd+Shift+Z</span>
+    </div>
+    <label title=".gltf と .bin を同フォルダで選択">
+      <input id="files" type="file" multiple webkitdirectory />
+      フォルダ/ファイル選択
+    </label>
+    <button id="btnUndo" disabled>元に戻す (Ctrl/Cmd+Z)</button>
+    <button id="btnRedo" disabled>やり直す (Ctrl+Y / ⇧+Ctrl/Cmd+Z)</button>
+  </header>
+
+  <div id="viewport" style="position:relative;">
+    <canvas id="canvas"></canvas>
+
+    <div class="panel" id="panel" hidden>
+      <div class="row">
+        <label for="boneSelect">ボーン</label>
+        <select id="boneSelect"></select>
+      </div>
+      <div class="row">
+        <label for="movePlane">移動平面</label>
+        <select id="movePlane">
+          <option value="screen" selected>スクリーン平面（カメラ面）</option>
+          <option value="world">ワールド XZ 平面（Y固定）</option>
+        </select>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="chkShowPickers"> ピッカー表示</label>
+        <span></span>
+      </div>
+      <div><strong>ログ</strong></div>
+      <div class="log" id="log">—</div>
+    </div>
+  </div>
+</div>
+<div id="err"></div>
+
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+/* ===== エラー可視化 ===== */
+const errBox=document.getElementById('err');
+function showErr(msg){ errBox.style.display='block'; errBox.textContent=String(msg); }
+addEventListener('error',e=>showErr(e.message||e.error));
+addEventListener('unhandledrejection',e=>showErr(e.reason?.message||e.reason||'Unhandled rejection'));
+
+/* ===== DOM ===== */
+const canvas=document.getElementById("canvas");
+const filesInput=document.getElementById("files");
+const panel=document.getElementById("panel");
+const logEl=document.getElementById("log");
+const boneSelect=document.getElementById("boneSelect");
+const movePlaneSel=document.getElementById("movePlane");
+const chkShowPickers=document.getElementById("chkShowPickers");
+const btnUndo=document.getElementById("btnUndo");
+const btnRedo=document.getElementById("btnRedo");
+function log(...a){ logEl.textContent+=a.join(" ")+"\n"; logEl.scrollTop=logEl.scrollHeight; }
+
+/* ===== Three ===== */
+const renderer=new THREE.WebGLRenderer({ antialias:true, canvas, alpha:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.outputColorSpace=THREE.SRGBColorSpace;
+
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x0b1020);
+const camera=new THREE.PerspectiveCamera(45,1,0.01,50000); camera.position.set(0,1.2,3);
+
+const controls=new OrbitControls(camera, renderer.domElement);
+controls.enableDamping=true;
+controls.mouseButtons={ MIDDLE:THREE.MOUSE.PAN, RIGHT:THREE.MOUSE.ROTATE };
+controls.touches={ ONE:THREE.TOUCH.ROTATE, TWO:THREE.TOUCH.DOLLY_PAN };
+
+scene.add(new THREE.GridHelper(10,10,0x234,0x123));
+scene.add(new THREE.AmbientLight(0xffffff,0.7));
+const dir=new THREE.DirectionalLight(0xffffff,2.0); dir.position.set(2,5,4); scene.add(dir);
+
+/* ===== Loader（テクスチャ無視） ===== */
+const loader=new GLTFLoader();
+const px1="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
+const filesMap=new Map();
+loader.manager.setURLModifier((url)=>{
+  const u=decodeURI(url).replace(/\\/g,"/");
+  if(/\.(png|jpg|jpeg|webp|ktx2|ktx|bmp|gif|tga)$/i.test(u)) return px1;
+  const k1=u, k2=u.replace(/^\.\/+/, ""), k3=k2.toLowerCase();
+  return filesMap.get(k1)||filesMap.get(k2)||filesMap.get(k3)||url;
+});
+
+/* ===== 状態 ===== */
+let model=null, skeleton=null, skeletonHelper=null, bones=[];
+let selectedBone=null;
+const raycaster=new THREE.Raycaster(), mouseNDC=new THREE.Vector2();
+let modelRoot=new THREE.Group(); scene.add(modelRoot);
+
+/* IK 休止情報（Local & World 参照） */
+const ikMap=new Map(); // child -> { parent, restLen, restDirLocal, parentRestLocalQ, restDirWorld, parentRestWorldQ }
+
+/* ピッカー球 */
+const pickerGroup=new THREE.Group(); scene.add(pickerGroup);
+const pickerGeo=new THREE.SphereGeometry(1,16,12);
+const pickerMat=new THREE.MeshBasicMaterial({ color:0x00ffff, opacity:0.16, transparent:true, depthTest:false });
+const pickerMatHidden=new THREE.MeshBasicMaterial({ color:0x00ffff, opacity:0.0, transparent:true, depthTest:false });
+let pickPixelRadius=24;
+
+/* ===== Undo / Redo ===== */
+const UNDO_LIMIT = 50;
+const undoStack=[]; // [{before:Pose, after:Pose}]
+const redoStack=[];
+let currentAction=null; // {before, after}
+
+function poseSnapshot(){
+  // 位置（子は休止値を維持する仕様だが、将来拡張に備えて position も持つ）
+  return bones.map(b=>({
+    name:b.name,
+    q:b.quaternion.clone(),
+    p:b.position.clone()
+  }));
+}
+function applyPose(pose){
+  // 名前でマッピング（インデックス変動に耐える）
+  const map=new Map(bones.map(b=>[b.name,b]));
+  pose.forEach(s=>{
+    const b=map.get(s.name);
+    if(!b) return;
+    b.quaternion.copy(s.q);
+    b.position.copy(s.p);
+  });
+  model?.updateMatrixWorld(true);
+  pickerUpdate();
+}
+function pushAction(action){
+  undoStack.push(action);
+  if(undoStack.length>UNDO_LIMIT) undoStack.shift();
+  redoStack.length=0;
+  updateUndoRedoButtons();
+}
+function updateUndoRedoButtons(){
+  btnUndo.disabled = undoStack.length===0;
+  btnRedo.disabled = redoStack.length===0;
+}
+function undo(){
+  if(!undoStack.length) return;
+  const act=undoStack.pop();
+  applyPose(act.before);
+  redoStack.push(act);
+  updateUndoRedoButtons();
+  log("Undo:", act.note||"");
+}
+function redo(){
+  if(!redoStack.length) return;
+  const act=redoStack.pop();
+  applyPose(act.after);
+  undoStack.push(act);
+  updateUndoRedoButtons();
+  log("Redo:", act.note||"");
+}
+
+/* ===== リサイズ ===== */
+function handleResize(){
+  const headerH=document.querySelector("header").offsetHeight;
+  const w=innerWidth, h=innerHeight-headerH;
+  renderer.setSize(w,h);
+  camera.aspect=w/h; camera.updateProjectionMatrix();
+}
+addEventListener("resize", handleResize);
+
+/* ===== 読み込み ===== */
+filesInput.addEventListener("change",(e)=>{
+  const list=e.target.files; if(!list?.length) return;
+  loadFromFileList(list).catch(showErr);
+});
+async function loadFromFileList(fileList){
+  clearModel();
+
+  const files=Array.from(fileList);
+  const gltfFile=files.find(f=>/\.gltf$/i.test(f.name));
+  if(!gltfFile){ alert(".gltf が見つかりません"); return; }
+  const basePath=(gltfFile.webkitRelativePath||gltfFile.name).replace(/\\/g,"/");
+  const baseDir=basePath.includes("/")? basePath.slice(0,basePath.lastIndexOf("/")):"";
+  for(const f of files){
+    const full=(f.webkitRelativePath||f.name).replace(/\\/g,"/");
+    const url=URL.createObjectURL(f);
+    const rel=baseDir && full.startsWith(baseDir+"/")? full.slice(baseDir.length+1):full;
+    const name=f.name;
+    [full,rel,"./"+rel,name,"./"+name,full.toLowerCase(),rel.toLowerCase(),name.toLowerCase()].forEach(k=>filesMap.set(k,url));
+  }
+
+  const text=await gltfFile.text();
+  await new Promise((res,rej)=>{
+    loader.parse(text,"",(gltf)=>{
+      model=gltf.scene||gltf.scenes?.[0];
+      modelRoot.add(model);
+
+      // 無地グレー
+      model.traverse(o=>{
+        if(o.isMesh){
+          const m=new THREE.MeshStandardMaterial({color:0xcccccc,roughness:0.8,metalness:0.0,transparent:true,opacity:0.95});
+          (Array.isArray(o.material)?o.material:[o.material]).forEach(mm=>mm?.dispose?.());
+          o.material=m;
+        }
+      });
+
+      model.updateMatrixWorld(true);
+
+      skeleton=findFirstSkeleton(model);
+      bones=skeleton? skeleton.bones: [];
+      if(skeleton){ skeletonHelper=new THREE.SkeletonHelper(model); scene.add(skeletonHelper); }
+
+      setupIKRestInfo();
+      pickerRebuild();
+      populateBoneSelect(bones);
+
+      panel.hidden=false;
+      // 初期ポーズをスタックに積む（Undoの起点）
+      pushAction({before: poseSnapshot(), after: poseSnapshot(), note:"初期ポーズ"});
+      res();
+    },(err)=>rej(err));
+  });
+}
+function findFirstSkeleton(root){ let sk=null; root.traverse(o=>{ if(o.isSkinnedMesh && o.skeleton && !sk) sk=o.skeleton; }); return sk; }
+function populateBoneSelect(arr){
+  const sel=boneSelect; sel.innerHTML="";
+  if(!arr.length){ const opt=document.createElement("option"); opt.textContent="（ボーンなし）"; sel.appendChild(opt); return; }
+  arr.forEach((b,i)=>{ const opt=document.createElement("option"); opt.value=i; opt.textContent=`${i}: ${b.name||("Bone_"+i)}`; sel.appendChild(opt); });
+  sel.value="0"; selectedBone=arr[0];
+}
+
+/* ===== IK 休止情報 ===== */
+function setupIKRestInfo(){
+  ikMap.clear();
+  if(!bones.length) return;
+
+  const pPos=new THREE.Vector3(), cPos=new THREE.Vector3(), pWQ=new THREE.Quaternion();
+
+  bones.forEach(child=>{
+    const parent = child.parent && child.parent.isBone ? child.parent : null;
+    if(!parent) return;
+
+    // Local（親ローカル）
+    const restLen = child.position.length();
+    const restDirLocal = restLen>1e-8 ? child.position.clone().normalize() : new THREE.Vector3(0,1,0);
+    const parentRestLocalQ = parent.quaternion.clone();
+
+    // World（参考）
+    parent.getWorldPosition(pPos);
+    child.getWorldPosition(cPos);
+    const dirW = cPos.clone().sub(pPos); const len = dirW.length();
+    const restDirWorld = len>1e-8 ? dirW.clone().normalize() : new THREE.Vector3(0,1,0);
+    parent.getWorldQuaternion(pWQ);
+
+    ikMap.set(child,{
+      parent, restLen,
+      restDirLocal, parentRestLocalQ,
+      restDirWorld, parentRestWorldQ: pWQ.clone()
+    });
+  });
+}
+
+/* ===== ピッカー ===== */
+chkShowPickers.addEventListener("change",()=>pickerGroup.children.forEach(m=>{ m.material = chkShowPickers.checked? pickerMat : pickerMatHidden; }));
+function pickerRebuild(){
+  pickerGroup.clear();
+  bones.forEach(b=>{
+    const m=new THREE.Mesh(pickerGeo, chkShowPickers.checked? pickerMat : pickerMatHidden);
+    m.userData.bone=b; pickerGroup.add(m);
+  });
+  pickerUpdate();
+}
+function pickerUpdate(){
+  const px=pickPixelRadius;
+  const fovRad=camera.fov*Math.PI/180;
+  const pxToRad=fovRad/renderer.domElement.clientHeight;
+  const ang=px*pxToRad;
+  const wp=new THREE.Vector3();
+  pickerGroup.children.forEach(m=>{
+    const b=m.userData.bone; if(!b) return;
+    b.getWorldPosition(wp);
+    m.position.copy(wp);
+    const dist=camera.position.distanceTo(wp);
+    m.scale.setScalar(Math.max(1e-4, Math.tan(ang)*dist));
+  });
+}
+
+/* ===== 左ドラッグ（親のみ回転・World→LocalをworldToLocalで厳密変換） ===== */
+let isLeftDragging=false;
+let dragPlane=null, dragOffsetWorld=null, dragBone=null, dragInfo=null;
+const tmpV=new THREE.Vector3(), pw=new THREE.Vector3();
+
+function setMouseNDC(ev){
+  const r=renderer.domElement.getBoundingClientRect();
+  mouseNDC.x=((ev.clientX-r.left)/r.width)*2-1;
+  mouseNDC.y=-((ev.clientY-r.top)/r.height)*2+1;
+}
+function pickBoneByRay(ev){
+  if(!bones.length) return null;
+  setMouseNDC(ev);
+  raycaster.setFromCamera(mouseNDC,camera);
+  const hits=raycaster.intersectObjects(pickerGroup.children,false);
+  return hits?.[0]?.object?.userData?.bone || null;
+}
+
+function beginDrag(ev,bone){
+  controls.enabled=false;
+  canvas.classList.add('cursor-move');
+  canvas.setPointerCapture(ev.pointerId);
+
+  dragBone=bone;
+  dragInfo=ikMap.get(bone);
+
+  // 1操作のスナップショット（before）
+  currentAction = { before: poseSnapshot(), after: null, note:`ドラッグ: ${bone.name||"(no name)"}` };
+
+  // 親位置を通るドラッグ平面
+  if(movePlaneSel.value==="world"){
+    dragInfo.parent.getWorldPosition(tmpV);
+    dragPlane=new THREE.Plane(new THREE.Vector3(0,1,0), -tmpV.y);
+  }else{
+    const n=new THREE.Vector3(); camera.getWorldDirection(n);
+    dragInfo.parent.getWorldPosition(tmpV);
+    dragPlane=new THREE.Plane().setFromNormalAndCoplanarPoint(n,tmpV);
+  }
+
+  // オフセット
+  setMouseNDC(ev);
+  raycaster.setFromCamera(mouseNDC,camera);
+  const hit=new THREE.Vector3(); bone.getWorldPosition(tmpV);
+  dragOffsetWorld = raycaster.ray.intersectPlane(dragPlane,hit) ? tmpV.clone().sub(hit) : new THREE.Vector3();
+
+  const idx=bones.indexOf(bone); if(idx>=0){ boneSelect.value=String(idx); selectedBone=bone; }
+  log("ドラッグ開始:", bone.name||"(no name)");
+}
+
+function dragMove(ev){
+  if(!dragBone||!dragPlane||!dragInfo) return;
+
+  // 平面上の目標点（World）
+  setMouseNDC(ev);
+  raycaster.setFromCamera(mouseNDC,camera);
+  const hit=new THREE.Vector3();
+  if(!raycaster.ray.intersectPlane(dragPlane,hit)) return;
+
+  // 親のWorld位置
+  dragInfo.parent.getWorldPosition(pw);
+
+  // 目標方向（World）
+  const newDirWorld = hit.add(dragOffsetWorld.clone()).sub(pw);
+  if(newDirWorld.lengthSq()<1e-12) return;
+  newDirWorld.normalize();
+
+  // World→親ローカル方向を 2点の差分で厳密に
+  const p0_local = dragInfo.parent.worldToLocal(pw.clone());
+  const p1_local = dragInfo.parent.worldToLocal(pw.clone().add(newDirWorld));
+  const newDirLocal = p1_local.sub(p0_local).normalize();
+
+  // 親ローカル回転差：restDirLocal → newDirLocal
+  const qDeltaLocal = new THREE.Quaternion().setFromUnitVectors(dragInfo.restDirLocal, newDirLocal);
+  dragInfo.parent.quaternion.copy(dragInfo.parentRestLocalQ.clone().multiply(qDeltaLocal));
+
+  // 子の position は休止値（方向×長さ）に固定
+  dragBone.position.copy(dragInfo.restDirLocal.clone().multiplyScalar(dragInfo.restLen));
+
+  dragInfo.parent.updateMatrixWorld(true);
+  dragBone.updateMatrixWorld(true);
+  pickerUpdate();
+}
+
+function endDrag(ev){
+  canvas.releasePointerCapture?.(ev.pointerId);
+  controls.enabled=true;
+  canvas.classList.remove('cursor-move');
+
+  // 1操作のスナップショット（after）→ Undo スタックへ
+  if(currentAction){
+    currentAction.after = poseSnapshot();
+    pushAction(currentAction);
+    currentAction=null;
+  }
+
+  dragBone=null; dragPlane=null; dragOffsetWorld=null; dragInfo=null;
+}
+
+/* ===== 入力（マウス） ===== */
+canvas.addEventListener("pointerdown",(e)=>{
+  if(e.button!==0) return;
+  const b=pickBoneByRay(e); if(!b) return;
+  e.preventDefault(); e.stopPropagation();
+  isLeftDragging=true; beginDrag(e,b);
+});
+canvas.addEventListener("pointermove",(e)=>{ if(isLeftDragging){ e.preventDefault(); dragMove(e); } });
+canvas.addEventListener("pointerup",(e)=>{ if(isLeftDragging){ isLeftDragging=false; endDrag(e); } });
+canvas.addEventListener("pointercancel",(e)=>{ if(isLeftDragging){ isLeftDragging=false; endDrag(e); } });
+
+/* ===== ショートカット / ボタン ===== */
+window.addEventListener("keydown",(e)=>{
+  // 入力系要素中は無効
+  const t=e.target; if(t && (/INPUT|TEXTAREA|SELECT/).test(t.tagName)) return;
+
+  const k=e.key.toLowerCase();
+  const mod=(e.ctrlKey||e.metaKey);
+  if(mod && k==='z' && !e.shiftKey){ e.preventDefault(); undo(); }
+  else if( (mod && k==='y') || (mod && k==='z' && e.shiftKey) ){ e.preventDefault(); redo(); }
+});
+btnUndo.addEventListener("click", undo);
+btnRedo.addEventListener("click", redo);
+
+/* ===== ループ ===== */
+(function tick(){
+  controls.update();
+  pickerUpdate();
+  renderer.render(scene,camera);
+  requestAnimationFrame(tick);
+})();
+handleResize();
+
+/* ===== 片付け・ユーティリティ ===== */
+function clearModel(){
+  if(model){ modelRoot.remove(model); model=null; }
+  if(skeletonHelper){ scene.remove(skeletonHelper); skeletonHelper=null; }
+  bones=[]; boneSelect.innerHTML=""; selectedBone=null; panel.hidden=true;
+  for(const url of filesMap.values()) URL.revokeObjectURL(url); filesMap.clear();
+  pickerGroup.clear(); ikMap.clear();
+  undoStack.length=0; redoStack.length=0; updateUndoRedoButtons();
+}
+</script>
+</body>
+</html>
