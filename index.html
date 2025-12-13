@@ -639,8 +639,6 @@ async function requestGyroPermission(){
 function startGyro(){
   if(gyroActive) return;
   gyroHandler=(e)=>{
-    const now=performance.now();
-    if(now-gyroLogAt<300) return; // ログ過多防止
     if(e.alpha==null&&e.beta==null&&e.gamma==null) return;
     const orientRad = (screen.orientation?.angle||0)*Math.PI/180;
     const gyroQ = deviceOrientationToQuaternion(e.alpha,e.beta,e.gamma,orientRad);
@@ -652,8 +650,11 @@ function startGyro(){
     const delta = gyroBaseQ.clone().invert().multiply(gyroQ);
     camera.quaternion.copy(delta.multiply(gyroBaseCamQ));
     camera.updateMatrixWorld(true);
-    gyroLogAt=now;
-    log(`gyro α=${fmtN(e.alpha,1)} β=${fmtN(e.beta,1)} γ=${fmtN(e.gamma,1)}`);
+    const now=performance.now();
+    if(now-gyroLogAt>=300){
+      gyroLogAt=now;
+      log(`gyro α=${fmtN(e.alpha,1)} β=${fmtN(e.beta,1)} γ=${fmtN(e.gamma,1)}`);
+    }
   };
   addEventListener("deviceorientation", gyroHandler);
   gyroActive=true;
@@ -679,7 +680,7 @@ btnGyro.addEventListener("click", async ()=>{
 
 /* ===== ループ ===== */
 (function tick(){
-  controls.update();
+  if(!gyroActive) controls.update(); // ジャイロ中はOrbitControls無効
   pickerUpdate();
   renderer.render(scene,camera);
   requestAnimationFrame(tick);
