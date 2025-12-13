@@ -5,7 +5,7 @@
       "name": "Chrome で HTML デバッグ",
       "type": "pwa-chrome",
       "request": "launch",
-      "url": "http://localhost:5500/bone-viewer-leftdrag-IK1.html",
+      "url": "http://localhost:8080/bone-viewer-leftdrag-IK1.html",
       "webRoot": "${workspaceFolder}"
     }
   ]
