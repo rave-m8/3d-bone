@@ -42,7 +42,7 @@
     </label>
     <button id="btnUndo" disabled>元に戻す</button>
     <button id="btnRedo" disabled>やり直す</button>
-    <button id="btnGyro">ジャイロ開始</button>
+    <button id="btnGyro">ジャイロ開始 V0.1.1</button>
   </header>
 
   <div id="viewport" style="position:relative;">
@@ -638,15 +638,17 @@ async function requestGyroPermission(){
 }
 function startGyro(){
   if(gyroActive) return;
+  controls.update(); // 現在のカメラ・ターゲットを確定（damping反映）
+  gyroBaseOffset=camera.position.clone().sub(controls.target);
+  gyroBaseTarget=controls.target.clone();
+  gyroBaseCamQ=camera.quaternion.clone();
+  gyroBaseQ=null; // デバイス基準は最初のイベントで取得
   gyroHandler=(e)=>{
     if(e.alpha==null&&e.beta==null&&e.gamma==null) return;
     const orientRad = (screen.orientation?.angle||0)*Math.PI/180;
     const gyroQ = deviceOrientationToQuaternion(e.alpha,e.beta,e.gamma,orientRad);
     if(!gyroBaseQ){
       gyroBaseQ=gyroQ.clone();
-      gyroBaseCamQ=camera.quaternion.clone();
-      gyroBaseOffset=camera.position.clone().sub(controls.target);
-      gyroBaseTarget=controls.target.clone();
       log("ジャイロ基準取得");
     }
     const delta = gyroBaseQ.clone().invert().multiply(gyroQ);
