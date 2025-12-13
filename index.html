@@ -42,6 +42,7 @@
     </label>
     <button id="btnUndo" disabled>元に戻す</button>
     <button id="btnRedo" disabled>やり直す</button>
+    <button id="btnGyro">ジャイロ開始</button>
   </header>
 
   <div id="viewport" style="position:relative;">
@@ -92,6 +93,7 @@ const movePlaneSel=document.getElementById("movePlane");
 const chkShowPickers=document.getElementById("chkShowPickers");
 const btnUndo=document.getElementById("btnUndo");
 const btnRedo=document.getElementById("btnRedo");
+const btnGyro=document.getElementById("btnGyro");
 function log(...a){ logEl.textContent+=a.join(" ")+"\n"; logEl.scrollTop=logEl.scrollHeight; }
 const fmtV=(v)=>v?`(${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)})`:"(-)";
 const fmtQ=(q)=>q?`(${q.x.toFixed(4)},${q.y.toFixed(4)},${q.z.toFixed(4)},${q.w.toFixed(4)})`:"(-)";
@@ -609,6 +611,44 @@ window.addEventListener("keydown",(e)=>{
 });
 btnUndo.addEventListener("click", undo);
 btnRedo.addEventListener("click", redo);
+
+/* ===== ジャイロ簡易ログ ===== */
+let gyroActive=false, gyroHandler=null, gyroLogAt=0;
+async function requestGyroPermission(){
+  if(typeof DeviceOrientationEvent==="undefined"){ log("ジャイロ: 非対応"); return false; }
+  if(typeof DeviceOrientationEvent.requestPermission==="function"){
+    const s=await DeviceOrientationEvent.requestPermission().catch(()=> "denied");
+    if(s!=="granted"){ log("ジャイロ: 許可されませんでした"); return false; }
+  }
+  return true;
+}
+function startGyro(){
+  if(gyroActive) return;
+  gyroHandler=(e)=>{
+    const now=performance.now();
+    if(now-gyroLogAt<300) return; // ログ過多防止
+    if(e.alpha==null&&e.beta==null&&e.gamma==null) return;
+    gyroLogAt=now;
+    log(`gyro α=${fmtN(e.alpha,1)} β=${fmtN(e.beta,1)} γ=${fmtN(e.gamma,1)}`);
+  };
+  addEventListener("deviceorientation", gyroHandler);
+  gyroActive=true;
+  btnGyro.textContent="ジャイロ停止";
+  log("ジャイロリスナー開始");
+}
+function stopGyro(){
+  if(!gyroActive) return;
+  removeEventListener("deviceorientation", gyroHandler);
+  gyroActive=false;
+  btnGyro.textContent="ジャイロ開始";
+  log("ジャイロリスナー停止");
+}
+btnGyro.addEventListener("click", async ()=>{
+  if(gyroActive){ stopGyro(); return; }
+  const ok=await requestGyroPermission();
+  if(!ok) return;
+  startGyro();
+});
 
 /* ===== ループ ===== */
 (function tick(){
