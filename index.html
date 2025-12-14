@@ -139,7 +139,7 @@ controls.touches={ ONE:THREE.TOUCH.ROTATE, TWO:THREE.TOUCH.DOLLY_PAN };
 
 scene.add(new THREE.GridHelper(10,10,0x234,0x123));
 scene.add(new THREE.AmbientLight(0xffffff,0.7));
-const dir=new THREE.DirectionalLight(0xffffff,2.0); dir.position.set(2,5,4); scene.add(dir);
+const dir=new THREE.DirectionalLight(0xffffff,2); dir.position.set(2,5,4); scene.add(dir);
 
 /* ===== Loader（テクスチャ無視） ===== */
 const loader=new GLTFLoader();
@@ -158,6 +158,11 @@ let selectedBone=null;
 const raycaster=new THREE.Raycaster(), mouseNDC=new THREE.Vector2();
 let modelRoot=new THREE.Group(); scene.add(modelRoot);
 const axisEnabled={x:true,y:true,z:true};
+let gyroGain=1.1;
+function syncGyroGain(){
+  const v=Number.parseFloat(gyroGainSelect.value);
+  gyroGain=Number.isFinite(v)?v:1.1;
+}
 function updateAxisButtons(){
   btnAxisX.setAttribute("aria-pressed", axisEnabled.x?"true":"false");
   btnAxisY.setAttribute("aria-pressed", axisEnabled.y?"true":"false");
@@ -177,7 +182,7 @@ const ikMap=new Map(); // child -> { parent, restLen, restDirLocal, restUpLocal,
 const pickerGroup=new THREE.Group(); scene.add(pickerGroup);
 const pickerGeo=new THREE.SphereGeometry(1,16,12);
 const pickerMat=new THREE.MeshBasicMaterial({ color:0x00ffff, opacity:0.16, transparent:true, depthTest:false });
-const pickerMatHidden=new THREE.MeshBasicMaterial({ color:0x00ffff, opacity:0.0, transparent:true, depthTest:false });
+const pickerMatHidden=new THREE.MeshBasicMaterial({ color:0x00ffff, opacity:0, transparent:true, depthTest:false });
 let pickPixelRadius=24;
 
 /* ===== Undo / Redo ===== */
@@ -278,7 +283,7 @@ async function loadFromFileList(fileList){
       // 無地グレー
       model.traverse(o=>{
         if(o.isMesh){
-          const m=new THREE.MeshStandardMaterial({color:0xcccccc,roughness:0.8,metalness:0.0,transparent:true,opacity:0.95});
+          const m=new THREE.MeshStandardMaterial({color:0xcccccc,roughness:0.8,metalness:0,transparent:true,opacity:0.95});
           (Array.isArray(o.material)?o.material:[o.material]).forEach(mm=>mm?.dispose?.());
           o.material=m;
         }
@@ -676,11 +681,6 @@ const tmpGyroQ=new THREE.Quaternion();
 const eulerTarget=new THREE.Euler();
 const eulerBaseModel=new THREE.Euler();
 const tmpAxis=new THREE.Vector3();
-let gyroGain=1.1;
-function syncGyroGain(){
-  const v=parseFloat(gyroGainSelect.value);
-  gyroGain=Number.isFinite(v)?v:1.1;
-}
 function deviceOrientationToQuaternion(alpha,beta,gamma,orient=0){
   // DeviceOrientationのalpha(Z軸回り), beta(X軸), gamma(Y軸)をthree座標系へ
   euler.set(THREE.MathUtils.degToRad(beta||0), THREE.MathUtils.degToRad(alpha||0), -THREE.MathUtils.degToRad(gamma||0), "YXZ");
