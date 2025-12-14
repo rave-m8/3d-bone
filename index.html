@@ -49,7 +49,7 @@
     <div class="header-row actions">
       <button id="btnUndo" disabled>元に戻す</button>
       <button id="btnRedo" disabled>やり直す</button>
-      <button id="btnGyro">ジャイロ開始 V0.1.5</button>
+      <button id="btnGyro">ジャイロ開始 V0.1.6</button>
       <button id="btnAxisX" class="toggle-btn" aria-pressed="true" title="X軸の反映 ON/OFF">X軸</button>
       <button id="btnAxisY" class="toggle-btn" aria-pressed="true" title="Y軸の反映 ON/OFF">Y軸</button>
       <button id="btnAxisZ" class="toggle-btn" aria-pressed="true" title="Z軸の反映 ON/OFF">Z軸</button>
@@ -371,6 +371,8 @@ const tmpScale=new THREE.Vector3();
 const tmpQWorld=new THREE.Quaternion();
 let dragLogCounter=0, lastDragLogTime=0;
 const DRAG_LOG_LIMIT=200;
+let dragParentStartWQ=null;
+let dragParentStartScaleSign=1;
 function logDragDebug(tag,info){
   const now=performance.now();
   if(dragLogCounter>=DRAG_LOG_LIMIT) return;
@@ -494,6 +496,13 @@ function beginDrag(ev,bone){
   dragLastDirLocal.copy(dragInfo?.restDirLocal||new THREE.Vector3(0,1,0));
   dragLogCounter=0; lastDragLogTime=0;
   dragPrevDirLocal=null;
+  dragParentStartWQ = dragInfo?.parent ? dragInfo.parent.getWorldQuaternion(new THREE.Quaternion()) : null;
+  if(dragInfo?.parent){
+    dragInfo.parent.getWorldScale(tmpScale);
+    dragParentStartScaleSign = Math.sign(tmpScale.x*tmpScale.y*tmpScale.z) || 1;
+  }else{
+    dragParentStartScaleSign = 1;
+  }
 
   // 1操作のスナップショット（before）
   currentAction = { before: poseSnapshot(), after: null, note:`ドラッグ: ${bone.name||"(no name)"}` };
@@ -543,13 +552,12 @@ function dragMove(ev){
   if(newDirWorld.lengthSq()<1e-12) return;
   newDirWorld.normalize();
 
-  // World方向を「現在の親ワールド回転の逆」でローカルへ（スケール符号のみ反映）
-  const invParentCurWQ = dragInfo.parent.getWorldQuaternion(tmpQWorld).invert();
-  dragInfo.parent.getWorldScale(tmpScale);
-  const curScaleSign = Math.sign(tmpScale.x*tmpScale.y*tmpScale.z) || 1;
+  // World方向を「ドラッグ開始時の親ワールド回転の逆」でローカルへ（スケール符号のみ反映）
+  const invParentStartWQ = dragParentStartWQ ? dragParentStartWQ.clone().invert() : dragInfo.parent.getWorldQuaternion(tmpQWorld).invert();
+  const scaleSign = dragParentStartScaleSign;
 
-  const newDirLocalRaw = newDirWorld.clone().applyQuaternion(invParentCurWQ);
-  if(curScaleSign<0) newDirLocalRaw.negate();
+  const newDirLocalRaw = newDirWorld.clone().applyQuaternion(invParentStartWQ);
+  if(scaleSign<0) newDirLocalRaw.negate();
 
   const lenLocal = newDirLocalRaw.length();
   const newDirLocal = lenLocal<1e-5
@@ -710,7 +718,7 @@ function stopGyro(){
   removeEventListener("deviceorientation", gyroHandler);
   gyroActive=false;
   gyroBaseQ=null; gyroBaseModelQ=null;
-  btnGyro.textContent="ジャイロ開始 V0.1.5";
+  btnGyro.textContent="ジャイロ開始 V0.1.6";
   log("ジャイロリスナー停止");
 }
 btnGyro.addEventListener("click", async ()=>{
