@@ -8,8 +8,10 @@
   html,body{height:100%;margin:0;background:#0b1020;color:#e5e7eb;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP","Meiryo",sans-serif}
   #app{display:grid;grid-template-rows:auto 1fr;height:100%}
   header{display:flex;flex-direction:column;gap:8px;align-items:flex-start;padding:10px;background:#0f172a}
-  .header-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;width:100%}
+  .header-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;width:100%}
   .header-row.actions{grid-template-columns:repeat(auto-fit,minmax(90px,1fr))}
+  .file-label{font-size:13px;padding:6px 10px;white-space:nowrap}
+  .file-label input[type="file"]{display:none}
   .title{font-weight:700}
   #canvas{width:100%;height:100%;display:block;touch-action:none}
   .panel{position:absolute;top:12px;right:12px;min-width:340px;max-width:46vw;background:rgba(15,23,42,.9);padding:12px;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,.35)}
@@ -37,14 +39,15 @@
 <div id="app">
   <header>
     <div class="header-row">
-      <label title=".gltf/.glb（gltfは.binと同フォルダ）を選択">
+      <label class="file-label" title=".gltf/.glb（gltfは.binと同フォルダ）を選択">
         <input id="filesFolder" type="file" multiple webkitdirectory />
-        フォルダ選択
+        gltf読み込み
       </label>
-      <label title=".gltf/.glb 単体または複数ファイル選択">
+      <label class="file-label" title=".gltf/.glb 単体または複数ファイル選択">
         <input id="filesFiles" type="file" multiple accept=".gltf,.glb,.bin,.png,.jpg,.jpeg,.webp,.ktx2,.ktx,.bmp,.gif,.tga" />
-        ファイル選択
+        GLB読み込み
       </label>
+      <button id="btnTogglePanel" disabled>ログ表示</button>
     </div>
     <div class="header-row actions">
       <button id="btnUndo" disabled>元に戻す</button>
@@ -54,12 +57,13 @@
       <button id="btnAxisY" class="toggle-btn" aria-pressed="true" title="Y軸の反映 ON/OFF">Y軸</button>
       <button id="btnAxisZ" class="toggle-btn" aria-pressed="true" title="Z軸の反映 ON/OFF">Z軸</button>
       <select id="gyroGain" title="ジャイロ感度（角度倍率）">
-        <option value="1.1" selected>1.1</option>
+        <option value="1.0">1.0</option>
+        <option value="1.1">1.1</option>
         <option value="1.3">1.3</option>
         <option value="1.5">1.5</option>
         <option value="2.0">2.0</option>
         <option value="2.5">2.5</option>
-        <option value="3.0">3.0</option>
+        <option value="3.0" selected>3.0</option>
         <option value="5.0">5.0</option>
       </select>
     </div>
@@ -107,6 +111,7 @@ const canvas=document.getElementById("canvas");
 const filesInputFolder=document.getElementById("filesFolder");
 const filesInputFiles=document.getElementById("filesFiles");
 const panel=document.getElementById("panel");
+const btnTogglePanel=document.getElementById("btnTogglePanel");
 const logEl=document.getElementById("log");
 const boneSelect=document.getElementById("boneSelect");
 const movePlaneSel=document.getElementById("movePlane");
@@ -123,6 +128,13 @@ const fmtV=(v)=>v?`(${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)})`:"(-)
 const fmtQ=(q)=>q?`(${q.x.toFixed(4)},${q.y.toFixed(4)},${q.z.toFixed(4)},${q.w.toFixed(4)})`:"(-)";
 const fmtN=(n,d=4)=>n===undefined?"" : n.toFixed(d);
 const radToDeg=(r)=>r*180/Math.PI;
+let panelVisible=false;
+function setPanelVisible(v){
+  panelVisible=!!v;
+  panel.hidden=!panelVisible;
+  btnTogglePanel.textContent=panelVisible?"ログ隠す":"ログ表示";
+}
+setPanelVisible(false);
 
 /* ===== Three ===== */
 const renderer=new THREE.WebGLRenderer({ antialias:true, canvas, alpha:true });
@@ -157,8 +169,8 @@ let model=null, skeleton=null, skeletonHelper=null, bones=[];
 let selectedBone=null;
 const raycaster=new THREE.Raycaster(), mouseNDC=new THREE.Vector2();
 let modelRoot=new THREE.Group(); scene.add(modelRoot);
-const axisEnabled={x:true,y:true,z:true};
-let gyroGain=1.1;
+const axisEnabled={x:false,y:true,z:false};
+let gyroGain=3.0;
 function syncGyroGain(){
   const v=Number.parseFloat(gyroGainSelect.value);
   gyroGain=Number.isFinite(v)?v:1.1;
@@ -183,7 +195,9 @@ const pickerGroup=new THREE.Group(); scene.add(pickerGroup);
 const pickerGeo=new THREE.SphereGeometry(1,16,12);
 const pickerMat=new THREE.MeshBasicMaterial({ color:0x00ffff, opacity:0.16, transparent:true, depthTest:false });
 const pickerMatHidden=new THREE.MeshBasicMaterial({ color:0x00ffff, opacity:0, transparent:true, depthTest:false });
-let pickPixelRadius=24;
+const PICK_RADIUS_MOUSE=24;
+const PICK_RADIUS_TOUCH=40;
+let pickPixelRadius=PICK_RADIUS_MOUSE;
 
 /* ===== Undo / Redo ===== */
 const UNDO_LIMIT = 50;
@@ -299,7 +313,8 @@ async function loadFromFileList(fileList){
       pickerRebuild();
       populateBoneSelect(bones);
 
-      panel.hidden=false;
+      setPanelVisible(true);
+      btnTogglePanel.disabled=false;
       // 初期ポーズをスタックに積む（Undoの起点）
       pushAction({before: poseSnapshot(), after: poseSnapshot(), note:"初期ポーズ"});
       res();
@@ -341,13 +356,18 @@ function setupIKRestInfo(){
     const parentRestScaleSign = Math.sign(pScale.x*pScale.y*pScale.z) || 1;
 
     ikMap.set(child,{
-      parent, restLen,
+      parent, child, restLen,
       restDirLocal, restUpLocal, parentRestLocalQ,
       restDirWorld, parentRestWorldQ: pWQ.clone(),
       parentRestScale: pScale.clone(),
       parentRestScaleSign
     });
   });
+}
+
+function getPrimaryChildBone(bone){
+  if(!bone) return null;
+  return bone.children.find(ch=>ch.isBone) || null;
 }
 
 /* ===== ピッカー ===== */
@@ -375,11 +395,14 @@ function pickerUpdate(){
   });
 }
 
-/* ===== 左ドラッグ（親のみ回転・World→LocalをworldToLocalで厳密変換） ===== */
+/* ===== 左ドラッグ（親/自身の回転・World→LocalをworldToLocalで厳密変換） ===== */
 let isLeftDragging=false;
 let dragPlane=null, dragOffsetWorld=null, dragBone=null, dragInfo=null;
+let dragMode="parent"; // "parent" か "self"（自身を回転）
 let dragLastDirLocal=new THREE.Vector3();
 let dragPrevDirLocal=null;
+let dragStartDirLocal=new THREE.Vector3();
+let dragParentStartLocalQ=new THREE.Quaternion();
 const tmpV=new THREE.Vector3(), pw=new THREE.Vector3(), tmpA=new THREE.Vector3(), tmpB=new THREE.Vector3();
 const tmpQ=new THREE.Quaternion();
 const tmpScale=new THREE.Vector3();
@@ -447,23 +470,28 @@ function pointSegmentDistSq2D(px,py,ax,ay,bx,by){
   const abx=bx-ax, aby=by-ay;
   const apx=px-ax, apy=py-ay;
   const abLenSq=abx*abx+aby*aby;
-  if(abLenSq<1e-12) return apx*apx+apy*apy; // ほぼ点
+  if(abLenSq<1e-12) return { distSq: apx*apx+apy*apy, t:0 }; // ほぼ点
   const t=Math.max(0,Math.min(1,(apx*abx+apy*aby)/abLenSq));
   const cx=ax+abx*t, cy=ay+aby*t;
   const dx=px-cx, dy=py-cy;
-  return dx*dx+dy*dy;
+  return { distSq: dx*dx+dy*dy, t };
 }
 function pickBoneByRay(ev){
   if(!bones.length) return null;
+  const radius=ev.pointerType==="touch"? PICK_RADIUS_TOUCH : PICK_RADIUS_MOUSE;
+
   setMouseNDC(ev);
   raycaster.setFromCamera(mouseNDC,camera);
   const hits=raycaster.intersectObjects(pickerGroup.children,false);
-  if(hits?.length) return hits[0].object?.userData?.bone || null;
+  if(hits?.length){
+    const hitBone=hits[0].object?.userData?.bone || null;
+    if(hitBone) return { bone: hitBone, hitT:0 };
+  }
 
   // フォールバック：線分（ボーン→子ボーン）をスクリーン座標で当たり判定し、「線分元のボーン」を返す
   const rect=renderer.domElement.getBoundingClientRect();
   const mx=ev.clientX-rect.left, my=ev.clientY-rect.top;
-  let bestBone=null, bestDistSq=Infinity;
+  let bestBone=null, bestDistSq=Infinity, bestT=0;
 
   bones.forEach(bone=>{
     // 親がボーンでない場合は回転対象にならないのでスキップ
@@ -479,10 +507,11 @@ function pickBoneByRay(ev){
       const x0=(p0.x*0.5+0.5)*rect.width, y0=(-p0.y*0.5+0.5)*rect.height;
       const x1=(p1.x*0.5+0.5)*rect.width, y1=(-p1.y*0.5+0.5)*rect.height;
 
-      const distSq=pointSegmentDistSq2D(mx,my,x0,y0,x1,y1);
+      const {distSq, t}=pointSegmentDistSq2D(mx,my,x0,y0,x1,y1);
       if(distSq<bestDistSq){
         bestDistSq=distSq;
         bestBone=bone;
+        bestT=t;
       }
     });
 
@@ -494,33 +523,57 @@ function pickBoneByRay(ev){
       if(distSq<bestDistSq){
         bestDistSq=distSq;
         bestBone=bone;
+        bestT=0;
       }
     }
   });
 
-  return (bestBone && bestDistSq<=pickPixelRadius*pickPixelRadius)? bestBone : null;
+  return (bestBone && bestDistSq<=radius*radius)? { bone:bestBone, hitT:bestT } : null;
 }
 
-function beginDrag(ev,bone){
+function beginDrag(ev,pick){
+  const bone=pick.bone;
+  const hitT=Math.max(0,Math.min(1, pick.hitT ?? 0));
+  const infoForParent=ikMap.get(bone);
+  const primaryChild=getPrimaryChildBone(bone);
+  const infoForSelf=primaryChild? ikMap.get(primaryChild) : null;
+
+  if(infoForSelf && (!infoForParent || hitT>0.5)){
+    dragInfo=infoForSelf;
+    dragMode="self";
+  }else{
+    dragInfo=infoForParent || infoForSelf;
+    dragMode=infoForParent ? "parent" : "self";
+  }
+  if(!dragInfo) return false;
+
   controls.enabled=false;
   canvas.classList.add('cursor-move');
   canvas.setPointerCapture(ev.pointerId);
 
   dragBone=bone;
-  dragInfo=ikMap.get(bone);
   dragLastDirLocal.copy(dragInfo?.restDirLocal||new THREE.Vector3(0,1,0));
   dragLogCounter=0; lastDragLogTime=0;
   dragPrevDirLocal=null;
   dragParentStartWQ = dragInfo?.parent ? dragInfo.parent.getWorldQuaternion(new THREE.Quaternion()) : null;
+  dragParentStartLocalQ.copy(dragInfo?.parent?.quaternion || new THREE.Quaternion());
   if(dragInfo?.parent){
     dragInfo.parent.getWorldScale(tmpScale);
     dragParentStartScaleSign = Math.sign(tmpScale.x*tmpScale.y*tmpScale.z) || 1;
   }else{
     dragParentStartScaleSign = 1;
   }
+  // ドラッグ開始時のローカル方向（現在の姿勢基準）
+  if(dragInfo.child){
+    const childLocal=dragInfo.child.position.clone();
+    const len=childLocal.length();
+    dragStartDirLocal = len>1e-8 ? childLocal.multiplyScalar(1/len) : dragInfo.restDirLocal.clone();
+  }else{
+    dragStartDirLocal = dragInfo.restDirLocal.clone();
+  }
 
   // 1操作のスナップショット（before）
-  currentAction = { before: poseSnapshot(), after: null, note:`ドラッグ: ${bone.name||"(no name)"}` };
+  currentAction = { before: poseSnapshot(), after: null, note:`ドラッグ: ${bone.name||"(no name)"} (${dragMode})` };
 
   // 親位置を通るドラッグ平面
   if(movePlaneSel.value==="world"){
@@ -535,11 +588,12 @@ function beginDrag(ev,bone){
   // オフセット
   setMouseNDC(ev);
   raycaster.setFromCamera(mouseNDC,camera);
-  const hit=new THREE.Vector3(); bone.getWorldPosition(tmpV);
-  dragOffsetWorld = raycaster.ray.intersectPlane(dragPlane,hit) ? tmpV.clone().sub(hit) : new THREE.Vector3();
+  const hit=new THREE.Vector3();
+  const childWorldPos = dragInfo.child ? dragInfo.child.getWorldPosition(tmpV) : bone.getWorldPosition(tmpV);
+  dragOffsetWorld = raycaster.ray.intersectPlane(dragPlane,hit) ? childWorldPos.clone().sub(hit) : new THREE.Vector3();
 
   const idx=bones.indexOf(bone); if(idx>=0){ boneSelect.value=String(idx); selectedBone=bone; }
-  log("ドラッグ開始:", bone.name||"(no name)");
+  log("ドラッグ開始:", bone.name||"(no name)", dragMode==="self"?"[自身]":"[親]");
   if(dragInfo){
     logDragDebug("start",{
       boneName:bone.name||"(no name)",
@@ -547,6 +601,7 @@ function beginDrag(ev,bone){
       parentQ:dragInfo.parentRestLocalQ
     });
   }
+  return true;
 }
 
 function dragMove(ev){
@@ -581,14 +636,17 @@ function dragMove(ev){
   dragLastDirLocal.copy(newDirLocal);
 
   // 親ローカル回転差：restDirLocal → newDirLocal（180度反転を安定化）
-  const qDeltaLocal = quatFromDirsStable(dragInfo.restDirLocal, newDirLocal, dragInfo.restUpLocal);
-  dragInfo.parent.quaternion.copy(dragInfo.parentRestLocalQ.clone().multiply(qDeltaLocal));
+  const qDeltaLocal = quatFromDirsStable(dragStartDirLocal, newDirLocal, dragInfo.restUpLocal);
+  dragInfo.parent.quaternion.copy(dragParentStartLocalQ.clone().multiply(qDeltaLocal));
 
   // 子の position は休止値（方向×長さ）に固定
-  dragBone.position.copy(dragInfo.restDirLocal.clone().multiplyScalar(dragInfo.restLen));
+  if(dragInfo.child){
+    dragInfo.child.position.copy(dragInfo.restDirLocal.clone().multiplyScalar(dragInfo.restLen));
+  }
 
   dragInfo.parent.updateMatrixWorld(true);
   dragBone.updateMatrixWorld(true);
+  dragInfo.child?.updateMatrixWorld(true);
   pickerUpdate();
 
   // デバッグログ（間欠）
@@ -641,9 +699,11 @@ function endDrag(ev){
 /* ===== 入力（マウス） ===== */
 canvas.addEventListener("pointerdown",(e)=>{
   if(e.button!==0) return;
-  const b=pickBoneByRay(e); if(!b) return;
+  const pick=pickBoneByRay(e); if(!pick) return;
   e.preventDefault(); e.stopPropagation();
-  isLeftDragging=true; beginDrag(e,b);
+  pickPixelRadius = e.pointerType==="touch"? PICK_RADIUS_TOUCH : PICK_RADIUS_MOUSE;
+  pickerUpdate();
+  if(beginDrag(e,pick)) isLeftDragging=true;
 });
 canvas.addEventListener("pointermove",(e)=>{ if(isLeftDragging){ e.preventDefault(); dragMove(e); } });
 canvas.addEventListener("pointerup",(e)=>{ if(isLeftDragging){ isLeftDragging=false; endDrag(e); } });
@@ -664,6 +724,7 @@ btnRedo.addEventListener("click", redo);
 btnAxisX.addEventListener("click",()=>toggleAxis("x"));
 btnAxisY.addEventListener("click",()=>toggleAxis("y"));
 btnAxisZ.addEventListener("click",()=>toggleAxis("z"));
+btnTogglePanel.addEventListener("click",()=>setPanelVisible(!panelVisible));
 gyroGainSelect.addEventListener("change",()=>{
   syncGyroGain();
   log(`ジャイロ感度: x${gyroGain.toFixed(2)}`);
@@ -776,10 +837,12 @@ handleResize();
 function clearModel(){
   if(model){ modelRoot.remove(model); model=null; }
   if(skeletonHelper){ scene.remove(skeletonHelper); skeletonHelper=null; }
-  bones=[]; boneSelect.innerHTML=""; selectedBone=null; panel.hidden=true;
+  bones=[]; boneSelect.innerHTML=""; selectedBone=null;
   for(const url of filesMap.values()) URL.revokeObjectURL(url); filesMap.clear();
   pickerGroup.clear(); ikMap.clear();
   undoStack.length=0; redoStack.length=0; updateUndoRedoButtons();
+  setPanelVisible(false);
+  btnTogglePanel.disabled=true;
 }
 </script>
 </body>
