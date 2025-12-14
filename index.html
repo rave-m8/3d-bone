@@ -8,8 +8,10 @@
   html,body{height:100%;margin:0;background:#0b1020;color:#e5e7eb;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP","Meiryo",sans-serif}
   #app{display:grid;grid-template-rows:auto 1fr;height:100%}
   header{display:flex;flex-direction:column;gap:8px;align-items:flex-start;padding:10px;background:#0f172a}
-  .header-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;width:100%}
+  .header-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;width:100%}
   .header-row.actions{grid-template-columns:repeat(auto-fit,minmax(90px,1fr))}
+  .file-label{font-size:13px;padding:6px 10px;white-space:nowrap}
+  .file-label input[type="file"]{display:none}
   .title{font-weight:700}
   #canvas{width:100%;height:100%;display:block;touch-action:none}
   .panel{position:absolute;top:12px;right:12px;min-width:340px;max-width:46vw;background:rgba(15,23,42,.9);padding:12px;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,.35)}
@@ -37,14 +39,15 @@
 <div id="app">
   <header>
     <div class="header-row">
-      <label title=".gltf/.glb（gltfは.binと同フォルダ）を選択">
+      <label class="file-label" title=".gltf/.glb（gltfは.binと同フォルダ）を選択">
         <input id="filesFolder" type="file" multiple webkitdirectory />
-        フォルダ選択
+        gltf読み込み
       </label>
-      <label title=".gltf/.glb 単体または複数ファイル選択">
+      <label class="file-label" title=".gltf/.glb 単体または複数ファイル選択">
         <input id="filesFiles" type="file" multiple accept=".gltf,.glb,.bin,.png,.jpg,.jpeg,.webp,.ktx2,.ktx,.bmp,.gif,.tga" />
-        ファイル選択
+        GLB読み込み
       </label>
+      <button id="btnTogglePanel" disabled>ログ表示</button>
     </div>
     <div class="header-row actions">
       <button id="btnUndo" disabled>元に戻す</button>
@@ -107,6 +110,7 @@ const canvas=document.getElementById("canvas");
 const filesInputFolder=document.getElementById("filesFolder");
 const filesInputFiles=document.getElementById("filesFiles");
 const panel=document.getElementById("panel");
+const btnTogglePanel=document.getElementById("btnTogglePanel");
 const logEl=document.getElementById("log");
 const boneSelect=document.getElementById("boneSelect");
 const movePlaneSel=document.getElementById("movePlane");
@@ -123,6 +127,13 @@ const fmtV=(v)=>v?`(${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)})`:"(-)
 const fmtQ=(q)=>q?`(${q.x.toFixed(4)},${q.y.toFixed(4)},${q.z.toFixed(4)},${q.w.toFixed(4)})`:"(-)";
 const fmtN=(n,d=4)=>n===undefined?"" : n.toFixed(d);
 const radToDeg=(r)=>r*180/Math.PI;
+let panelVisible=false;
+function setPanelVisible(v){
+  panelVisible=!!v;
+  panel.hidden=!panelVisible;
+  btnTogglePanel.textContent=panelVisible?"ログ隠す":"ログ表示";
+}
+setPanelVisible(false);
 
 /* ===== Three ===== */
 const renderer=new THREE.WebGLRenderer({ antialias:true, canvas, alpha:true });
@@ -301,7 +312,8 @@ async function loadFromFileList(fileList){
       pickerRebuild();
       populateBoneSelect(bones);
 
-      panel.hidden=false;
+      setPanelVisible(true);
+      btnTogglePanel.disabled=false;
       // 初期ポーズをスタックに積む（Undoの起点）
       pushAction({before: poseSnapshot(), after: poseSnapshot(), note:"初期ポーズ"});
       res();
@@ -711,6 +723,7 @@ btnRedo.addEventListener("click", redo);
 btnAxisX.addEventListener("click",()=>toggleAxis("x"));
 btnAxisY.addEventListener("click",()=>toggleAxis("y"));
 btnAxisZ.addEventListener("click",()=>toggleAxis("z"));
+btnTogglePanel.addEventListener("click",()=>setPanelVisible(!panelVisible));
 gyroGainSelect.addEventListener("change",()=>{
   syncGyroGain();
   log(`ジャイロ感度: x${gyroGain.toFixed(2)}`);
@@ -823,10 +836,12 @@ handleResize();
 function clearModel(){
   if(model){ modelRoot.remove(model); model=null; }
   if(skeletonHelper){ scene.remove(skeletonHelper); skeletonHelper=null; }
-  bones=[]; boneSelect.innerHTML=""; selectedBone=null; panel.hidden=true;
+  bones=[]; boneSelect.innerHTML=""; selectedBone=null;
   for(const url of filesMap.values()) URL.revokeObjectURL(url); filesMap.clear();
   pickerGroup.clear(); ikMap.clear();
   undoStack.length=0; redoStack.length=0; updateUndoRedoButtons();
+  setPanelVisible(false);
+  btnTogglePanel.disabled=true;
 }
 </script>
 </body>
