@@ -734,6 +734,7 @@ syncGyroGain();
 /* ===== ジャイロ：相対回転でモデル制御（ルート回転） ===== */
 let gyroActive=false, gyroHandler=null, gyroLogAt=0;
 let gyroBaseQ=null, gyroBaseModelQ=null;
+const isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
 const zee=new THREE.Vector3(0,0,1);
 const euler=new THREE.Euler();
 const q0=new THREE.Quaternion();
@@ -763,6 +764,13 @@ function scaleQuaternionAngle(q,gain){
   const sinNew=Math.sin(half), cosNew=Math.cos(half);
   return new THREE.Quaternion(tmpAxis.x*sinNew, tmpAxis.y*sinNew, tmpAxis.z*sinNew, cosNew).normalize();
 }
+function normalizeDeviceOrientation(e){
+  // iOSのbeta/gamma軸をAndroid基準に寄せる
+  const alpha = e.alpha??0;
+  const beta = isiOS ? (e.gamma??0) : (e.beta??0);
+  const gamma = isiOS ? -(e.beta??0) : (e.gamma??0);
+  return { alpha, beta, gamma };
+}
 async function requestGyroPermission(){
   if(typeof DeviceOrientationEvent==="undefined"){ log("ジャイロ: 非対応"); return false; }
   if(typeof DeviceOrientationEvent.requestPermission==="function"){
@@ -778,11 +786,12 @@ function startGyro(){
   gyroBaseQ=null; // デバイス基準は最初のイベントで取得
   gyroHandler=(e)=>{
     if(e.alpha==null&&e.beta==null&&e.gamma==null) return;
+    const {alpha,beta,gamma}=normalizeDeviceOrientation(e);
     const orientRad = (screen.orientation?.angle||0)*Math.PI/180;
-    const gyroQ = deviceOrientationToQuaternion(e.alpha,e.beta,e.gamma,orientRad);
+    const gyroQ = deviceOrientationToQuaternion(alpha,beta,gamma,orientRad);
     if(!gyroBaseQ){
       gyroBaseQ=gyroQ.clone();
-      log("ジャイロ基準取得");
+      log(isiOS?"ジャイロ基準取得 (iOS軸補正有)":"ジャイロ基準取得");
     }
     const delta = gyroBaseQ.clone().invert().multiply(gyroQ);
     const deltaScaled = scaleQuaternionAngle(delta, gyroGain);
