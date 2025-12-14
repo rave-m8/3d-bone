@@ -388,6 +388,8 @@ let dragPlane=null, dragOffsetWorld=null, dragBone=null, dragInfo=null;
 let dragMode="parent"; // "parent" か "self"（自身を回転）
 let dragLastDirLocal=new THREE.Vector3();
 let dragPrevDirLocal=null;
+let dragStartDirLocal=new THREE.Vector3();
+let dragParentStartLocalQ=new THREE.Quaternion();
 const tmpV=new THREE.Vector3(), pw=new THREE.Vector3(), tmpA=new THREE.Vector3(), tmpB=new THREE.Vector3();
 const tmpQ=new THREE.Quaternion();
 const tmpScale=new THREE.Vector3();
@@ -541,11 +543,20 @@ function beginDrag(ev,pick){
   dragLogCounter=0; lastDragLogTime=0;
   dragPrevDirLocal=null;
   dragParentStartWQ = dragInfo?.parent ? dragInfo.parent.getWorldQuaternion(new THREE.Quaternion()) : null;
+  dragParentStartLocalQ.copy(dragInfo?.parent?.quaternion || new THREE.Quaternion());
   if(dragInfo?.parent){
     dragInfo.parent.getWorldScale(tmpScale);
     dragParentStartScaleSign = Math.sign(tmpScale.x*tmpScale.y*tmpScale.z) || 1;
   }else{
     dragParentStartScaleSign = 1;
+  }
+  // ドラッグ開始時のローカル方向（現在の姿勢基準）
+  if(dragInfo.child){
+    const childLocal=dragInfo.child.position.clone();
+    const len=childLocal.length();
+    dragStartDirLocal = len>1e-8 ? childLocal.multiplyScalar(1/len) : dragInfo.restDirLocal.clone();
+  }else{
+    dragStartDirLocal = dragInfo.restDirLocal.clone();
   }
 
   // 1操作のスナップショット（before）
@@ -612,8 +623,8 @@ function dragMove(ev){
   dragLastDirLocal.copy(newDirLocal);
 
   // 親ローカル回転差：restDirLocal → newDirLocal（180度反転を安定化）
-  const qDeltaLocal = quatFromDirsStable(dragInfo.restDirLocal, newDirLocal, dragInfo.restUpLocal);
-  dragInfo.parent.quaternion.copy(dragInfo.parentRestLocalQ.clone().multiply(qDeltaLocal));
+  const qDeltaLocal = quatFromDirsStable(dragStartDirLocal, newDirLocal, dragInfo.restUpLocal);
+  dragInfo.parent.quaternion.copy(dragParentStartLocalQ.clone().multiply(qDeltaLocal));
 
   // 子の position は休止値（方向×長さ）に固定
   if(dragInfo.child){
