@@ -169,7 +169,6 @@ function toggleAxis(axis){
   log(`軸 ${axis.toUpperCase()}: ${axisEnabled[axis]?"ON":"OFF"}`);
 }
 updateAxisButtons();
-gyroGain = parseFloat(gyroGainSelect.value)||1.1;
 
 /* IK 休止情報（Local & World 参照） */
 const ikMap=new Map(); // child -> { parent, restLen, restDirLocal, restUpLocal, parentRestLocalQ, restDirWorld, parentRestWorldQ, parentRestScale, parentRestScaleSign }
@@ -661,10 +660,10 @@ btnAxisX.addEventListener("click",()=>toggleAxis("x"));
 btnAxisY.addEventListener("click",()=>toggleAxis("y"));
 btnAxisZ.addEventListener("click",()=>toggleAxis("z"));
 gyroGainSelect.addEventListener("change",()=>{
-  const v=parseFloat(gyroGainSelect.value);
-  gyroGain=Number.isFinite(v)?v:1.0;
+  syncGyroGain();
   log(`ジャイロ感度: x${gyroGain.toFixed(2)}`);
 });
+syncGyroGain();
 
 /* ===== ジャイロ：相対回転でモデル制御（ルート回転） ===== */
 let gyroActive=false, gyroHandler=null, gyroLogAt=0;
@@ -678,6 +677,10 @@ const eulerTarget=new THREE.Euler();
 const eulerBaseModel=new THREE.Euler();
 const tmpAxis=new THREE.Vector3();
 let gyroGain=1.1;
+function syncGyroGain(){
+  const v=parseFloat(gyroGainSelect.value);
+  gyroGain=Number.isFinite(v)?v:1.1;
+}
 function deviceOrientationToQuaternion(alpha,beta,gamma,orient=0){
   // DeviceOrientationのalpha(Z軸回り), beta(X軸), gamma(Y軸)をthree座標系へ
   euler.set(THREE.MathUtils.degToRad(beta||0), THREE.MathUtils.degToRad(alpha||0), -THREE.MathUtils.degToRad(gamma||0), "YXZ");
