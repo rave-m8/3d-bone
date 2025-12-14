@@ -7,13 +7,15 @@
 <style>
   html,body{height:100%;margin:0;background:#0b1020;color:#e5e7eb;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP","Meiryo",sans-serif}
   #app{display:grid;grid-template-rows:auto 1fr;height:100%}
-  header{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;padding:10px;background:#0f172a}
+  header{display:grid;grid-template-columns:1fr repeat(7,auto);gap:8px;align-items:center;padding:10px;background:#0f172a}
   .title{font-weight:700}
   #canvas{width:100%;height:100%;display:block;touch-action:none}
   .panel{position:absolute;top:12px;right:12px;min-width:340px;max-width:46vw;background:rgba(15,23,42,.9);padding:12px;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,.35)}
   .row{display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:8px}
   select,button,input[type="range"],label{border-radius:8px;border:1px solid #334155;background:#111827;color:#e5e7eb;padding:6px 8px}
   button:disabled{opacity:.5}
+  .toggle-btn{min-width:52px}
+  .toggle-btn[aria-pressed="true"]{background:#1d4ed8;border-color:#3b82f6;box-shadow:0 0 0 1px rgba(59,130,246,.4) inset}
   .log{font:12px/1.4 ui-monospace,Consolas,Menlo,monospace;white-space:pre-wrap;background:#0b1222;border:1px solid #334155;border-radius:8px;padding:8px;max-height:28vh;overflow:auto}
   .tag{font-size:12px;padding:2px 6px;border:1px solid #334155;border-radius:999px;color:#cbd5e1}
   #err{position:fixed;left:12px;bottom:12px;max-width:56vw;background:#7f1d1d;color:#fecaca;padding:8px 10px;border-radius:8px;font:12px/1.4 ui-monospace;display:none;white-space:pre-wrap}
@@ -42,7 +44,10 @@
     </label>
     <button id="btnUndo" disabled>元に戻す</button>
     <button id="btnRedo" disabled>やり直す</button>
-    <button id="btnGyro">ジャイロ開始 V0.1.2</button>
+    <button id="btnGyro">ジャイロ開始 V0.1.3</button>
+    <button id="btnAxisX" class="toggle-btn" aria-pressed="true" title="X軸の反映 ON/OFF">X軸</button>
+    <button id="btnAxisY" class="toggle-btn" aria-pressed="true" title="Y軸の反映 ON/OFF">Y軸</button>
+    <button id="btnAxisZ" class="toggle-btn" aria-pressed="true" title="Z軸の反映 ON/OFF">Z軸</button>
   </header>
 
   <div id="viewport" style="position:relative;">
@@ -94,6 +99,9 @@ const chkShowPickers=document.getElementById("chkShowPickers");
 const btnUndo=document.getElementById("btnUndo");
 const btnRedo=document.getElementById("btnRedo");
 const btnGyro=document.getElementById("btnGyro");
+const btnAxisX=document.getElementById("btnAxisX");
+const btnAxisY=document.getElementById("btnAxisY");
+const btnAxisZ=document.getElementById("btnAxisZ");
 function log(...a){ logEl.textContent+=a.join(" ")+"\n"; logEl.scrollTop=logEl.scrollHeight; }
 const fmtV=(v)=>v?`(${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)})`:"(-)";
 const fmtQ=(q)=>q?`(${q.x.toFixed(4)},${q.y.toFixed(4)},${q.z.toFixed(4)},${q.w.toFixed(4)})`:"(-)";
@@ -133,6 +141,18 @@ let model=null, skeleton=null, skeletonHelper=null, bones=[];
 let selectedBone=null;
 const raycaster=new THREE.Raycaster(), mouseNDC=new THREE.Vector2();
 let modelRoot=new THREE.Group(); scene.add(modelRoot);
+const axisEnabled={x:true,y:true,z:true};
+function updateAxisButtons(){
+  btnAxisX.setAttribute("aria-pressed", axisEnabled.x?"true":"false");
+  btnAxisY.setAttribute("aria-pressed", axisEnabled.y?"true":"false");
+  btnAxisZ.setAttribute("aria-pressed", axisEnabled.z?"true":"false");
+}
+function toggleAxis(axis){
+  axisEnabled[axis]=!axisEnabled[axis];
+  updateAxisButtons();
+  log(`軸 ${axis.toUpperCase()}: ${axisEnabled[axis]?"ON":"OFF"}`);
+}
+updateAxisButtons();
 
 /* IK 休止情報（Local & World 参照） */
 const ikMap=new Map(); // child -> { parent, restLen, restDirLocal, restUpLocal, parentRestLocalQ, restDirWorld, parentRestWorldQ, parentRestScale, parentRestScaleSign }
@@ -611,6 +631,9 @@ window.addEventListener("keydown",(e)=>{
 });
 btnUndo.addEventListener("click", undo);
 btnRedo.addEventListener("click", redo);
+btnAxisX.addEventListener("click",()=>toggleAxis("x"));
+btnAxisY.addEventListener("click",()=>toggleAxis("y"));
+btnAxisZ.addEventListener("click",()=>toggleAxis("z"));
 
 /* ===== ジャイロ：相対回転でモデル制御（ルート回転） ===== */
 let gyroActive=false, gyroHandler=null, gyroLogAt=0;
@@ -620,6 +643,8 @@ const euler=new THREE.Euler();
 const q0=new THREE.Quaternion();
 const q1=new THREE.Quaternion(-Math.sqrt(0.5),0,0,Math.sqrt(0.5)); // -PI/2 X回転（デバイス座標→three座標補正）
 const tmpGyroQ=new THREE.Quaternion();
+const eulerTarget=new THREE.Euler();
+const eulerBaseModel=new THREE.Euler();
 function deviceOrientationToQuaternion(alpha,beta,gamma,orient=0){
   // DeviceOrientationのalpha(Z軸回り), beta(X軸), gamma(Y軸)をthree座標系へ
   euler.set(THREE.MathUtils.degToRad(beta||0), THREE.MathUtils.degToRad(alpha||0), -THREE.MathUtils.degToRad(gamma||0), "YXZ");
@@ -650,8 +675,16 @@ function startGyro(){
       log("ジャイロ基準取得");
     }
     const delta = gyroBaseQ.clone().invert().multiply(gyroQ);
-    const newModelQ = delta.multiply(gyroBaseModelQ);
-    modelRoot.quaternion.copy(newModelQ);
+    const targetQ = delta.multiply(gyroBaseModelQ);
+    if(!(axisEnabled.x && axisEnabled.y && axisEnabled.z)){
+      eulerTarget.setFromQuaternion(targetQ,"XYZ");
+      eulerBaseModel.setFromQuaternion(gyroBaseModelQ,"XYZ");
+      if(!axisEnabled.x) eulerTarget.x=eulerBaseModel.x;
+      if(!axisEnabled.y) eulerTarget.y=eulerBaseModel.y;
+      if(!axisEnabled.z) eulerTarget.z=eulerBaseModel.z;
+      targetQ.setFromEuler(eulerTarget);
+    }
+    modelRoot.quaternion.copy(targetQ);
     modelRoot.updateMatrixWorld(true);
     const now=performance.now();
     if(now-gyroLogAt>=300){
@@ -670,7 +703,7 @@ function stopGyro(){
   removeEventListener("deviceorientation", gyroHandler);
   gyroActive=false;
   gyroBaseQ=null; gyroBaseModelQ=null;
-  btnGyro.textContent="ジャイロ開始 v0.1.2";
+  btnGyro.textContent="ジャイロ開始 V0.1.3";
   log("ジャイロリスナー停止");
 }
 btnGyro.addEventListener("click", async ()=>{
