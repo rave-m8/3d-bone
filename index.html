@@ -52,7 +52,8 @@
     <div class="header-row actions">
       <button id="btnUndo" disabled>元に戻す</button>
       <button id="btnRedo" disabled>やり直す</button>
-      <button id="btnGyro">ジャイロ開始 V0.1.8</button>
+      <button id="btnGyro">ジャイロ開始 V0.1.9</button>
+      <button id="btnGyroTarget" class="toggle-btn" aria-pressed="false" title="ジャイロをどこにかけるか（ワールド/モデル内ルート）を切り替え">ジャイロ:ワールド</button>
       <button id="btnAxisX" class="toggle-btn" aria-pressed="true" title="X軸の反映 ON/OFF">X軸</button>
       <button id="btnAxisY" class="toggle-btn" aria-pressed="true" title="Y軸の反映 ON/OFF">Y軸</button>
       <button id="btnAxisZ" class="toggle-btn" aria-pressed="true" title="Z軸の反映 ON/OFF">Z軸</button>
@@ -119,6 +120,7 @@ const chkShowPickers=document.getElementById("chkShowPickers");
 const btnUndo=document.getElementById("btnUndo");
 const btnRedo=document.getElementById("btnRedo");
 const btnGyro=document.getElementById("btnGyro");
+const btnGyroTarget=document.getElementById("btnGyroTarget");
 const btnAxisX=document.getElementById("btnAxisX");
 const btnAxisY=document.getElementById("btnAxisY");
 const btnAxisZ=document.getElementById("btnAxisZ");
@@ -170,6 +172,7 @@ let selectedBone=null;
 const raycaster=new THREE.Raycaster(), mouseNDC=new THREE.Vector2();
 let modelRoot=new THREE.Group(); scene.add(modelRoot);
 const axisEnabled={x:false,y:true,z:false};
+let gyroUseLocalRoot=false;
 let gyroGain=3.0;
 function syncGyroGain(){
   const v=Number.parseFloat(gyroGainSelect.value);
@@ -186,6 +189,15 @@ function toggleAxis(axis){
   log(`軸 ${axis.toUpperCase()}: ${axisEnabled[axis]?"ON":"OFF"}`);
 }
 updateAxisButtons();
+function updateGyroTargetButton(){
+  btnGyroTarget.setAttribute("aria-pressed", gyroUseLocalRoot?"true":"false");
+  btnGyroTarget.textContent=gyroUseLocalRoot?"ジャイロ:ローカル":"ジャイロ:ワールド";
+  btnGyroTarget.title=gyroUseLocalRoot?"モデル内ルートのローカル姿勢に適用":"モデル全体（ワールド基準）の姿勢に適用";
+}
+updateGyroTargetButton();
+function gyroTargetNode(){
+  return (gyroUseLocalRoot && model) ? model : modelRoot;
+}
 
 /* IK 休止情報（Local & World 参照） */
 const ikMap=new Map(); // child -> { parent, restLen, restDirLocal, restUpLocal, parentRestLocalQ, restDirWorld, parentRestWorldQ, parentRestScale, parentRestScaleSign }
@@ -730,6 +742,19 @@ gyroGainSelect.addEventListener("change",()=>{
   log(`ジャイロ感度: x${gyroGain.toFixed(2)}`);
 });
 syncGyroGain();
+btnGyroTarget.addEventListener("click",()=>{
+  gyroUseLocalRoot=!gyroUseLocalRoot;
+  updateGyroTargetButton();
+  if(gyroUseLocalRoot && !model){
+    log("モデル未読込: ローカル指定中でもワールドグループへ適用します");
+  }
+  if(gyroActive){
+    gyroBaseModelQ=gyroTargetNode().quaternion.clone();
+    log("ジャイロ対象切替に合わせて基準を再取得しました");
+  }else{
+    log(gyroUseLocalRoot?"ジャイロ適用先: モデル内ルート（ローカル）":"ジャイロ適用先: モデル全体（ワールド）");
+  }
+});
 
 /* ===== ジャイロ：相対回転でモデル制御（ルート回転） ===== */
 let gyroActive=false, gyroHandler=null, gyroLogAt=0;
@@ -781,11 +806,13 @@ async function requestGyroPermission(){
 }
 function startGyro(){
   if(gyroActive) return;
+  const targetNode=gyroTargetNode();
   controls.update(); // damping反映のみ（カメラは固定）
-  gyroBaseModelQ=modelRoot.quaternion.clone();
+  gyroBaseModelQ=targetNode.quaternion.clone();
   gyroBaseQ=null; // デバイス基準は最初のイベントで取得
   gyroHandler=(e)=>{
     if(e.alpha==null&&e.beta==null&&e.gamma==null) return;
+    const node=gyroTargetNode();
     const {alpha,beta,gamma}=normalizeDeviceOrientation(e);
     const orientRad = (screen.orientation?.angle||0)*Math.PI/180;
     const gyroQ = deviceOrientationToQuaternion(alpha,beta,gamma,orientRad);
@@ -804,12 +831,12 @@ function startGyro(){
       if(!axisEnabled.z) eulerTarget.z=eulerBaseModel.z;
       targetQ.setFromEuler(eulerTarget);
     }
-    modelRoot.quaternion.copy(targetQ);
-    modelRoot.updateMatrixWorld(true);
+    node.quaternion.copy(targetQ);
+    node.updateMatrixWorld(true);
     const now=performance.now();
     if(now-gyroLogAt>=300){
       gyroLogAt=now;
-      const rot=modelRoot.rotation;
+      const rot=node.rotation;
       //log(`gyro α=${fmtN(e.alpha,1)} β=${fmtN(e.beta,1)} γ=${fmtN(e.gamma,1)} | model rot(deg) x=${fmtN(radToDeg(rot.x),1)} y=${fmtN(radToDeg(rot.y),1)} z=${fmtN(radToDeg(rot.z),1)}`);
       log(`gyro α=${fmtN(e.alpha,1)} β=${fmtN(e.beta,1)} γ=${fmtN(e.gamma,1)}`);
       //log(`model rot(deg) x=${fmtN(radToDeg(rot.x),1)} y=${fmtN(radToDeg(rot.y),1)} z=${fmtN(radToDeg(rot.z),1)}`);
