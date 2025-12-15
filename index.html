@@ -52,7 +52,8 @@
     <div class="header-row actions">
       <button id="btnUndo" disabled>元に戻す</button>
       <button id="btnRedo" disabled>やり直す</button>
-      <button id="btnGyro">ジャイロ開始 V0.1.7</button>
+      <button id="btnGyro">ジャイロ開始 V0.1.10</button>
+      <button id="btnGyroTarget" class="toggle-btn" aria-pressed="false" title="ジャイロをどこにかけるか（ワールド/モデル内ルート）を切り替え">ジャイロ:ワールド</button>
       <button id="btnAxisX" class="toggle-btn" aria-pressed="true" title="X軸の反映 ON/OFF">X軸</button>
       <button id="btnAxisY" class="toggle-btn" aria-pressed="true" title="Y軸の反映 ON/OFF">Y軸</button>
       <button id="btnAxisZ" class="toggle-btn" aria-pressed="true" title="Z軸の反映 ON/OFF">Z軸</button>
@@ -119,6 +120,7 @@ const chkShowPickers=document.getElementById("chkShowPickers");
 const btnUndo=document.getElementById("btnUndo");
 const btnRedo=document.getElementById("btnRedo");
 const btnGyro=document.getElementById("btnGyro");
+const btnGyroTarget=document.getElementById("btnGyroTarget");
 const btnAxisX=document.getElementById("btnAxisX");
 const btnAxisY=document.getElementById("btnAxisY");
 const btnAxisZ=document.getElementById("btnAxisZ");
@@ -169,7 +171,9 @@ let model=null, skeleton=null, skeletonHelper=null, bones=[];
 let selectedBone=null;
 const raycaster=new THREE.Raycaster(), mouseNDC=new THREE.Vector2();
 let modelRoot=new THREE.Group(); scene.add(modelRoot);
+const gyroYawNode=new THREE.Group(); modelRoot.add(gyroYawNode); // ジャイロ用のY分離ノード
 const axisEnabled={x:false,y:true,z:false};
+let gyroUseLocalRoot=false;
 let gyroGain=3.0;
 function syncGyroGain(){
   const v=Number.parseFloat(gyroGainSelect.value);
@@ -186,6 +190,15 @@ function toggleAxis(axis){
   log(`軸 ${axis.toUpperCase()}: ${axisEnabled[axis]?"ON":"OFF"}`);
 }
 updateAxisButtons();
+function updateGyroTargetButton(){
+  btnGyroTarget.setAttribute("aria-pressed", gyroUseLocalRoot?"true":"false");
+  btnGyroTarget.textContent=gyroUseLocalRoot?"ジャイロ:ローカル":"ジャイロ:ワールド";
+  btnGyroTarget.title=gyroUseLocalRoot?"モデル内ルートのローカル姿勢に適用":"モデル全体（ワールド基準）の姿勢に適用";
+}
+updateGyroTargetButton();
+function gyroTargetNode(){
+  return gyroUseLocalRoot ? gyroYawNode : modelRoot;
+}
 
 /* IK 休止情報（Local & World 参照） */
 const ikMap=new Map(); // child -> { parent, restLen, restDirLocal, restUpLocal, parentRestLocalQ, restDirWorld, parentRestWorldQ, parentRestScale, parentRestScaleSign }
@@ -292,7 +305,7 @@ async function loadFromFileList(fileList){
   await new Promise((res,rej)=>{
     loader.parse(content,"",(gltf)=>{
       model=gltf.scene||gltf.scenes?.[0];
-      modelRoot.add(model);
+      gyroYawNode.add(model);
 
       // 無地グレー
       model.traverse(o=>{
@@ -730,10 +743,27 @@ gyroGainSelect.addEventListener("change",()=>{
   log(`ジャイロ感度: x${gyroGain.toFixed(2)}`);
 });
 syncGyroGain();
+btnGyroTarget.addEventListener("click",()=>{
+  gyroUseLocalRoot=!gyroUseLocalRoot;
+  updateGyroTargetButton();
+  if(gyroUseLocalRoot && !model){
+    log("モデル未読込: ローカル指定中でもワールドグループへ適用します");
+  }
+  if(gyroActive){
+    gyroBaseModelQ=gyroTargetNode().quaternion.clone();
+    gyroBaseOuterEuler=modelRoot.rotation.clone();
+    gyroBaseYaw=gyroYawNode.rotation.y;
+    log("ジャイロ対象切替に合わせて基準を再取得しました");
+  }else{
+    log(gyroUseLocalRoot?"ジャイロ適用先: モデル内ルート（ローカル）":"ジャイロ適用先: モデル全体（ワールド）");
+  }
+});
 
 /* ===== ジャイロ：相対回転でモデル制御（ルート回転） ===== */
 let gyroActive=false, gyroHandler=null, gyroLogAt=0;
 let gyroBaseQ=null, gyroBaseModelQ=null;
+let gyroBaseOuterEuler=null, gyroBaseYaw=0;
+const isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
 const zee=new THREE.Vector3(0,0,1);
 const euler=new THREE.Euler();
 const q0=new THREE.Quaternion();
@@ -763,6 +793,13 @@ function scaleQuaternionAngle(q,gain){
   const sinNew=Math.sin(half), cosNew=Math.cos(half);
   return new THREE.Quaternion(tmpAxis.x*sinNew, tmpAxis.y*sinNew, tmpAxis.z*sinNew, cosNew).normalize();
 }
+function normalizeDeviceOrientation(e){
+  // iOSのbeta/gamma軸をAndroid基準に寄せる
+  const alpha = e.alpha??0;
+  const beta = isiOS ? (e.gamma??0) : (e.beta??0);
+  const gamma = isiOS ? -(e.beta??0) : (e.gamma??0);
+  return { alpha, beta, gamma };
+}
 async function requestGyroPermission(){
   if(typeof DeviceOrientationEvent==="undefined"){ log("ジャイロ: 非対応"); return false; }
   if(typeof DeviceOrientationEvent.requestPermission==="function"){
@@ -774,34 +811,58 @@ async function requestGyroPermission(){
 function startGyro(){
   if(gyroActive) return;
   controls.update(); // damping反映のみ（カメラは固定）
-  gyroBaseModelQ=modelRoot.quaternion.clone();
+  gyroBaseModelQ=gyroTargetNode().quaternion.clone();
+  gyroBaseOuterEuler=modelRoot.rotation.clone();
+  gyroBaseYaw=gyroYawNode.rotation.y;
   gyroBaseQ=null; // デバイス基準は最初のイベントで取得
   gyroHandler=(e)=>{
     if(e.alpha==null&&e.beta==null&&e.gamma==null) return;
+    const node=gyroTargetNode();
+    const {alpha,beta,gamma}=normalizeDeviceOrientation(e);
     const orientRad = (screen.orientation?.angle||0)*Math.PI/180;
-    const gyroQ = deviceOrientationToQuaternion(e.alpha,e.beta,e.gamma,orientRad);
+    const gyroQ = deviceOrientationToQuaternion(alpha,beta,gamma,orientRad);
     if(!gyroBaseQ){
       gyroBaseQ=gyroQ.clone();
-      log("ジャイロ基準取得");
+      log(isiOS?"ジャイロ基準取得 (iOS軸補正有)":"ジャイロ基準取得");
     }
     const delta = gyroBaseQ.clone().invert().multiply(gyroQ);
     const deltaScaled = scaleQuaternionAngle(delta, gyroGain);
-    const targetQ = deltaScaled.clone().multiply(gyroBaseModelQ);
-    if(!(axisEnabled.x && axisEnabled.y && axisEnabled.z)){
-      eulerTarget.setFromQuaternion(targetQ,"XYZ");
-      eulerBaseModel.setFromQuaternion(gyroBaseModelQ,"XYZ");
-      if(!axisEnabled.x) eulerTarget.x=eulerBaseModel.x;
-      if(!axisEnabled.y) eulerTarget.y=eulerBaseModel.y;
-      if(!axisEnabled.z) eulerTarget.z=eulerBaseModel.z;
-      targetQ.setFromEuler(eulerTarget);
+
+    if(gyroUseLocalRoot){
+      // 分離モード：ピッチ/ロールは外側（modelRoot）、ヨーは内側（gyroYawNode）へ
+      eulerTarget.setFromQuaternion(deltaScaled,"YXZ");
+      const dx = axisEnabled.x ? eulerTarget.x : 0;
+      const dy = axisEnabled.y ? eulerTarget.y : 0;
+      const dz = axisEnabled.z ? eulerTarget.z : 0;
+      const base=gyroBaseOuterEuler||modelRoot.rotation;
+      modelRoot.rotation.set(base.x+dx, base.y, base.z+dz, "YXZ");
+      gyroYawNode.rotation.set(0, gyroBaseYaw+dy, 0);
+      modelRoot.updateMatrixWorld(true);
+      gyroYawNode.updateMatrixWorld(true);
+      model?.updateMatrixWorld(true);
+    }else{
+      // 従来モード：ワールド基準で modelRoot に適用
+      const targetQ = deltaScaled.clone().multiply(gyroBaseModelQ);
+      if(!(axisEnabled.x && axisEnabled.y && axisEnabled.z)){
+        eulerTarget.setFromQuaternion(targetQ,"YXZ");
+        eulerBaseModel.setFromQuaternion(gyroBaseModelQ,"YXZ");
+        if(!axisEnabled.x) eulerTarget.x=eulerBaseModel.x;
+        if(!axisEnabled.y) eulerTarget.y=eulerBaseModel.y;
+        if(!axisEnabled.z) eulerTarget.z=eulerBaseModel.z;
+        targetQ.setFromEuler(eulerTarget);
+      }
+      gyroYawNode.rotation.set(0,0,0);
+      model?.updateMatrixWorld(true);
+      node.quaternion.copy(targetQ);
+      node.updateMatrixWorld(true);
     }
-    modelRoot.quaternion.copy(targetQ);
-    modelRoot.updateMatrixWorld(true);
     const now=performance.now();
     if(now-gyroLogAt>=300){
       gyroLogAt=now;
-      const rot=modelRoot.rotation;
-      log(`gyro α=${fmtN(e.alpha,1)} β=${fmtN(e.beta,1)} γ=${fmtN(e.gamma,1)} | model rot(deg) x=${fmtN(radToDeg(rot.x),1)} y=${fmtN(radToDeg(rot.y),1)} z=${fmtN(radToDeg(rot.z),1)}`);
+      const rot=node.rotation;
+      //log(`gyro α=${fmtN(e.alpha,1)} β=${fmtN(e.beta,1)} γ=${fmtN(e.gamma,1)} | model rot(deg) x=${fmtN(radToDeg(rot.x),1)} y=${fmtN(radToDeg(rot.y),1)} z=${fmtN(radToDeg(rot.z),1)}`);
+      log(`gyro α=${fmtN(e.alpha,1)} β=${fmtN(e.beta,1)} γ=${fmtN(e.gamma,1)}`);
+      //log(`model rot(deg) x=${fmtN(radToDeg(rot.x),1)} y=${fmtN(radToDeg(rot.y),1)} z=${fmtN(radToDeg(rot.z),1)}`);
     }
   };
   addEventListener("deviceorientation", gyroHandler);
@@ -814,7 +875,7 @@ function stopGyro(){
   removeEventListener("deviceorientation", gyroHandler);
   gyroActive=false;
   gyroBaseQ=null; gyroBaseModelQ=null;
-  btnGyro.textContent="ジャイロ開始 V0.1.7";
+  btnGyro.textContent="ジャイロ開始";
   log("ジャイロリスナー停止");
 }
 btnGyro.addEventListener("click", async ()=>{
@@ -835,7 +896,7 @@ handleResize();
 
 /* ===== 片付け・ユーティリティ ===== */
 function clearModel(){
-  if(model){ modelRoot.remove(model); model=null; }
+  if(model){ gyroYawNode.remove(model); model=null; }
   if(skeletonHelper){ scene.remove(skeletonHelper); skeletonHelper=null; }
   bones=[]; boneSelect.innerHTML=""; selectedBone=null;
   for(const url of filesMap.values()) URL.revokeObjectURL(url); filesMap.clear();
