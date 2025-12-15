@@ -797,8 +797,8 @@ function startGyro(){
     const deltaScaled = scaleQuaternionAngle(delta, gyroGain);
     const targetQ = deltaScaled.clone().multiply(gyroBaseModelQ);
     if(!(axisEnabled.x && axisEnabled.y && axisEnabled.z)){
-      eulerTarget.setFromQuaternion(targetQ,"XYZ");
-      eulerBaseModel.setFromQuaternion(gyroBaseModelQ,"XYZ");
+    eulerTarget.setFromQuaternion(targetQ,"YXZ");
+    eulerBaseModel.setFromQuaternion(gyroBaseModelQ,"YXZ");
       if(!axisEnabled.x) eulerTarget.x=eulerBaseModel.x;
       if(!axisEnabled.y) eulerTarget.y=eulerBaseModel.y;
       if(!axisEnabled.z) eulerTarget.z=eulerBaseModel.z;
