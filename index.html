@@ -52,7 +52,7 @@
     <div class="header-row actions">
       <button id="btnUndo" disabled>元に戻す</button>
       <button id="btnRedo" disabled>やり直す</button>
-      <button id="btnGyro">ジャイロ開始 V0.1.7</button>
+      <button id="btnGyro">ジャイロ開始 V0.1.8</button>
       <button id="btnAxisX" class="toggle-btn" aria-pressed="true" title="X軸の反映 ON/OFF">X軸</button>
       <button id="btnAxisY" class="toggle-btn" aria-pressed="true" title="Y軸の反映 ON/OFF">Y軸</button>
       <button id="btnAxisZ" class="toggle-btn" aria-pressed="true" title="Z軸の反映 ON/OFF">Z軸</button>
@@ -825,7 +825,7 @@ function stopGyro(){
   removeEventListener("deviceorientation", gyroHandler);
   gyroActive=false;
   gyroBaseQ=null; gyroBaseModelQ=null;
-  btnGyro.textContent="ジャイロ開始 V0.1.7";
+  btnGyro.textContent="ジャイロ開始";
   log("ジャイロリスナー停止");
 }
 btnGyro.addEventListener("click", async ()=>{
