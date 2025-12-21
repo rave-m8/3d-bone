@@ -48,6 +48,10 @@
         GLB読み込み
       </label>
       <button id="btnTogglePanel" disabled>ログ表示</button>
+      <select id="twoFingerMode" title="二本指の操作を切り替え">
+        <option value="camera" selected>二本での操作:カメラ</option>
+        <option value="bone">二本での操作:ボーン</option>
+      </select>
     </div>
     <div class="header-row actions">
       <button id="btnUndo" disabled>元に戻す</button>
@@ -125,6 +129,7 @@ const btnAxisX=document.getElementById("btnAxisX");
 const btnAxisY=document.getElementById("btnAxisY");
 const btnAxisZ=document.getElementById("btnAxisZ");
 const gyroGainSelect=document.getElementById("gyroGain");
+const twoFingerModeSelect=document.getElementById("twoFingerMode");
 function log(...a){ logEl.textContent+=a.join(" ")+"\n"; logEl.scrollTop=logEl.scrollHeight; }
 const fmtV=(v)=>v?`(${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)})`:"(-)";
 const fmtQ=(q)=>q?`(${q.x.toFixed(4)},${q.y.toFixed(4)},${q.z.toFixed(4)},${q.w.toFixed(4)})`:"(-)";
@@ -175,6 +180,10 @@ const gyroYawNode=new THREE.Group(); modelRoot.add(gyroYawNode); // ジャイロ
 const axisEnabled={x:false,y:true,z:false};
 let gyroUseLocalRoot=false;
 let gyroGain=3.0;
+const TWO_FINGER_CAMERA="camera";
+const TWO_FINGER_BONE="bone";
+let twoFingerMode=TWO_FINGER_CAMERA;
+let twoFingerCameraOverride=false;
 function syncGyroGain(){
   const v=Number.parseFloat(gyroGainSelect.value);
   gyroGain=Number.isFinite(v)?v:1.1;
@@ -211,6 +220,8 @@ const pickerMatHidden=new THREE.MeshBasicMaterial({ color:0x00ffff, opacity:0, t
 const PICK_RADIUS_MOUSE=24;
 const PICK_RADIUS_TOUCH=40;
 let pickPixelRadius=PICK_RADIUS_MOUSE;
+const activeTouchIds=new Set();
+const activeDrags=new Map();
 
 /* ===== Undo / Redo ===== */
 const UNDO_LIMIT = 50;
@@ -409,29 +420,19 @@ function pickerUpdate(){
 }
 
 /* ===== 左ドラッグ（親/自身の回転・World→LocalをworldToLocalで厳密変換） ===== */
-let isLeftDragging=false;
-let dragPlane=null, dragOffsetWorld=null, dragBone=null, dragInfo=null;
-let dragMode="parent"; // "parent" か "self"（自身を回転）
-let dragLastDirLocal=new THREE.Vector3();
-let dragPrevDirLocal=null;
-let dragStartDirLocal=new THREE.Vector3();
-let dragParentStartLocalQ=new THREE.Quaternion();
 const tmpV=new THREE.Vector3(), pw=new THREE.Vector3(), tmpA=new THREE.Vector3(), tmpB=new THREE.Vector3();
 const tmpP0=new THREE.Vector3(), tmpP1=new THREE.Vector3(), tmpCam=new THREE.Vector3();
 const tmpQ=new THREE.Quaternion();
 const tmpScale=new THREE.Vector3();
 const tmpQWorld=new THREE.Quaternion();
-let dragLogCounter=0, lastDragLogTime=0;
 const DRAG_LOG_LIMIT=200;
-let dragParentStartWQ=null;
-let dragParentStartScaleSign=1;
-function logDragDebug(tag,info){
+function logDragDebug(state,tag,info){
   const now=performance.now();
-  if(dragLogCounter>=DRAG_LOG_LIMIT) return;
-  if(now-lastDragLogTime<25) return; // 短時間の連打を抑制
-  dragLogCounter++; lastDragLogTime=now;
+  if(state.dragLogCounter>=DRAG_LOG_LIMIT) return;
+  if(now-state.lastDragLogTime<25) return; // 短時間の連打を抑制
+  state.dragLogCounter++; state.lastDragLogTime=now;
   const msg=[
-    `[drag ${dragLogCounter}] ${tag}`,
+    `[drag ${state.dragLogCounter}] ${tag}`,
     info.boneName?`bone=${info.boneName}`:"",
     info.restDir?`rest=${fmtV(info.restDir)}`:"",
     info.newDir?`new=${fmtV(info.newDir)}`:"",
@@ -554,183 +555,284 @@ function pickBoneByRay(ev){
   return (bestBone && bestDistSq<=radius*radius)? { bone:bestBone, hitT:bestT } : null;
 }
 
+function countTouchDrags(){
+  let count=0;
+  for(const state of activeDrags.values()){
+    if(state.pointerType==="touch") count++;
+  }
+  return count;
+}
+
+function syncTwoFingerControls(){
+  const allowCamera = (twoFingerMode===TWO_FINGER_CAMERA) || twoFingerCameraOverride;
+  controls.touches.TWO = allowCamera ? THREE.TOUCH.DOLLY_PAN : THREE.TOUCH.NONE;
+}
+
+function maybeEnableTwoFingerCamera(ev){
+  if(ev.pointerType!=="touch") return;
+  if(twoFingerMode!==TWO_FINGER_BONE) return;
+  if(activeDrags.size>0 || countTouchDrags()>0) return;
+  const nextTouchCount = activeTouchIds.has(ev.pointerId) ? activeTouchIds.size : activeTouchIds.size+1;
+  if(nextTouchCount<2) return;
+  const pick=pickBoneByRay(ev);
+  if(pick) return;
+  twoFingerCameraOverride=true;
+  syncTwoFingerControls();
+}
+
+function createDragState(){
+  return {
+    dragPlane:null,
+    dragOffsetWorld:null,
+    dragBone:null,
+    dragInfo:null,
+    dragMode:"parent",
+    dragLastDirLocal:new THREE.Vector3(),
+    dragPrevDirLocal:null,
+    dragStartDirLocal:new THREE.Vector3(),
+    dragParentStartLocalQ:new THREE.Quaternion(),
+    dragParentStartWQ:null,
+    dragParentStartScaleSign:1,
+    currentAction:null,
+    pointerType:"",
+    dragLogCounter:0,
+    lastDragLogTime:0
+  };
+}
+
 function beginDrag(ev,pick){
   const bone=pick.bone;
   const hitT=Math.max(0,Math.min(1, pick.hitT ?? 0));
   const infoForParent=ikMap.get(bone);
   const primaryChild=getPrimaryChildBone(bone);
   const infoForSelf=primaryChild? ikMap.get(primaryChild) : null;
+  const state=createDragState();
 
   if(infoForSelf && (!infoForParent || hitT>0.5)){
-    dragInfo=infoForSelf;
-    dragMode="self";
+    state.dragInfo=infoForSelf;
+    state.dragMode="self";
   }else{
-    dragInfo=infoForParent || infoForSelf;
-    dragMode=infoForParent ? "parent" : "self";
+    state.dragInfo=infoForParent || infoForSelf;
+    state.dragMode=infoForParent ? "parent" : "self";
   }
-  if(!dragInfo) return false;
+  if(!state.dragInfo) return null;
 
-  controls.enabled=false;
-  canvas.classList.add('cursor-move');
+  if(activeDrags.size===0){
+    controls.enabled=false;
+    canvas.classList.add('cursor-move');
+  }
   canvas.setPointerCapture(ev.pointerId);
 
-  dragBone=bone;
-  dragLastDirLocal.copy(dragInfo?.restDirLocal||new THREE.Vector3(0,1,0));
-  dragLogCounter=0; lastDragLogTime=0;
-  dragPrevDirLocal=null;
-  dragParentStartWQ = dragInfo?.parent ? dragInfo.parent.getWorldQuaternion(new THREE.Quaternion()) : null;
-  dragParentStartLocalQ.copy(dragInfo?.parent?.quaternion || new THREE.Quaternion());
-  if(dragInfo?.parent){
-    dragInfo.parent.getWorldScale(tmpScale);
-    dragParentStartScaleSign = Math.sign(tmpScale.x*tmpScale.y*tmpScale.z) || 1;
+  state.dragBone=bone;
+  state.pointerType=ev.pointerType;
+  state.dragLastDirLocal.copy(state.dragInfo?.restDirLocal||new THREE.Vector3(0,1,0));
+  state.dragLogCounter=0; state.lastDragLogTime=0;
+  state.dragPrevDirLocal=null;
+  state.dragParentStartWQ = state.dragInfo?.parent ? state.dragInfo.parent.getWorldQuaternion(new THREE.Quaternion()) : null;
+  state.dragParentStartLocalQ.copy(state.dragInfo?.parent?.quaternion || new THREE.Quaternion());
+  if(state.dragInfo?.parent){
+    state.dragInfo.parent.getWorldScale(tmpScale);
+    state.dragParentStartScaleSign = Math.sign(tmpScale.x*tmpScale.y*tmpScale.z) || 1;
   }else{
-    dragParentStartScaleSign = 1;
+    state.dragParentStartScaleSign = 1;
   }
   // ドラッグ開始時のローカル方向（現在の姿勢基準）
-  if(dragInfo.child){
-    const childLocal=dragInfo.child.position.clone();
+  if(state.dragInfo.child){
+    const childLocal=state.dragInfo.child.position.clone();
     const len=childLocal.length();
-    dragStartDirLocal = len>1e-8 ? childLocal.multiplyScalar(1/len) : dragInfo.restDirLocal.clone();
+    state.dragStartDirLocal = len>1e-8 ? childLocal.multiplyScalar(1/len) : state.dragInfo.restDirLocal.clone();
   }else{
-    dragStartDirLocal = dragInfo.restDirLocal.clone();
+    state.dragStartDirLocal = state.dragInfo.restDirLocal.clone();
   }
 
   // 1操作のスナップショット（before）
-  currentAction = { before: poseSnapshot(), after: null, note:`ドラッグ: ${bone.name||"(no name)"} (${dragMode})` };
+  state.currentAction = { before: poseSnapshot(), after: null, note:`ドラッグ: ${bone.name||"(no name)"} (${state.dragMode})` };
 
   // 親位置を通るドラッグ平面
   if(movePlaneSel.value==="world"){
-    dragInfo.parent.getWorldPosition(tmpV);
-    dragPlane=new THREE.Plane(new THREE.Vector3(0,1,0), -tmpV.y);
+    state.dragInfo.parent.getWorldPosition(tmpV);
+    state.dragPlane=new THREE.Plane(new THREE.Vector3(0,1,0), -tmpV.y);
   }else{
     const n=new THREE.Vector3(); camera.getWorldDirection(n);
-    dragInfo.parent.getWorldPosition(tmpV);
-    dragPlane=new THREE.Plane().setFromNormalAndCoplanarPoint(n,tmpV);
+    state.dragInfo.parent.getWorldPosition(tmpV);
+    state.dragPlane=new THREE.Plane().setFromNormalAndCoplanarPoint(n,tmpV);
   }
 
   // オフセット
   setMouseNDC(ev);
   raycaster.setFromCamera(mouseNDC,camera);
   const hit=new THREE.Vector3();
-  const childWorldPos = dragInfo.child ? dragInfo.child.getWorldPosition(tmpV) : bone.getWorldPosition(tmpV);
-  dragOffsetWorld = raycaster.ray.intersectPlane(dragPlane,hit) ? childWorldPos.clone().sub(hit) : new THREE.Vector3();
+  const childWorldPos = state.dragInfo.child ? state.dragInfo.child.getWorldPosition(tmpV) : bone.getWorldPosition(tmpV);
+  state.dragOffsetWorld = raycaster.ray.intersectPlane(state.dragPlane,hit) ? childWorldPos.clone().sub(hit) : new THREE.Vector3();
 
   const idx=bones.indexOf(bone); if(idx>=0){ boneSelect.value=String(idx); selectedBone=bone; }
-  log("ドラッグ開始:", bone.name||"(no name)", dragMode==="self"?"[自身]":"[親]");
-  if(dragInfo){
-    logDragDebug("start",{
+  log("ドラッグ開始:", bone.name||"(no name)", state.dragMode==="self"?"[自身]":"[親]");
+  if(state.dragInfo){
+    logDragDebug(state,"start",{
       boneName:bone.name||"(no name)",
-      restDir:dragInfo.restDirLocal,
-      parentQ:dragInfo.parentRestLocalQ
+      restDir:state.dragInfo.restDirLocal,
+      parentQ:state.dragInfo.parentRestLocalQ
     });
   }
-  return true;
+  return state;
 }
 
-function dragMove(ev){
-  if(!dragBone||!dragPlane||!dragInfo) return;
+function dragMove(ev,state){
+  if(!state?.dragBone||!state.dragPlane||!state.dragInfo) return;
 
   // 平面上の目標点（World）
   setMouseNDC(ev);
   raycaster.setFromCamera(mouseNDC,camera);
   const hit=new THREE.Vector3();
-  if(!raycaster.ray.intersectPlane(dragPlane,hit)) return;
+  if(!raycaster.ray.intersectPlane(state.dragPlane,hit)) return;
 
   // 親のWorld位置
-  dragInfo.parent.getWorldPosition(pw);
+  state.dragInfo.parent.getWorldPosition(pw);
 
   // 目標方向（World）
-  const newDirWorldRaw = hit.clone().add(dragOffsetWorld).sub(pw);
+  const newDirWorldRaw = hit.clone().add(state.dragOffsetWorld).sub(pw);
   const newDirWorld = newDirWorldRaw.clone();
   if(newDirWorld.lengthSq()<1e-12) return;
   newDirWorld.normalize();
 
   // World方向を「ドラッグ開始時の親ワールド回転の逆」でローカルへ（スケール符号のみ反映）
-  const invParentStartWQ = dragParentStartWQ ? dragParentStartWQ.clone().invert() : dragInfo.parent.getWorldQuaternion(tmpQWorld).invert();
-  const scaleSign = dragParentStartScaleSign;
+  const invParentStartWQ = state.dragParentStartWQ ? state.dragParentStartWQ.clone().invert() : state.dragInfo.parent.getWorldQuaternion(tmpQWorld).invert();
+  const scaleSign = state.dragParentStartScaleSign;
 
   const newDirLocalRaw = newDirWorld.clone().applyQuaternion(invParentStartWQ);
   if(scaleSign<0) newDirLocalRaw.negate();
 
   const lenLocal = newDirLocalRaw.length();
-  const newDirLocal = lenLocal<1e-5
-    ? dragLastDirLocal.clone()
-    : newDirLocalRaw.normalize();
-  dragLastDirLocal.copy(newDirLocal);
+  const newDirLocal = lenLocal<1e-5 ? state.dragLastDirLocal.clone() : newDirLocalRaw.normalize();
+  state.dragLastDirLocal.copy(newDirLocal);
 
   // 親ローカル回転差：restDirLocal → newDirLocal（180度反転を安定化）
-  const qDeltaLocal = quatFromDirsStable(dragStartDirLocal, newDirLocal, dragInfo.restUpLocal);
-  dragInfo.parent.quaternion.copy(dragParentStartLocalQ.clone().multiply(qDeltaLocal));
+  const qDeltaLocal = quatFromDirsStable(state.dragStartDirLocal, newDirLocal, state.dragInfo.restUpLocal);
+  state.dragInfo.parent.quaternion.copy(state.dragParentStartLocalQ.clone().multiply(qDeltaLocal));
 
   // 子の position は休止値（方向×長さ）に固定
-  if(dragInfo.child){
-    dragInfo.child.position.copy(dragInfo.restDirLocal.clone().multiplyScalar(dragInfo.restLen));
+  if(state.dragInfo.child){
+    state.dragInfo.child.position.copy(state.dragInfo.restDirLocal.clone().multiplyScalar(state.dragInfo.restLen));
   }
 
-  dragInfo.parent.updateMatrixWorld(true);
-  dragBone.updateMatrixWorld(true);
-  dragInfo.child?.updateMatrixWorld(true);
+  state.dragInfo.parent.updateMatrixWorld(true);
+  state.dragBone.updateMatrixWorld(true);
+  state.dragInfo.child?.updateMatrixWorld(true);
   pickerUpdate();
 
   // デバッグログ（間欠）
-  const deltaDeg = dragPrevDirLocal
-    ? radToDeg(Math.acos(THREE.MathUtils.clamp(dragPrevDirLocal.dot(newDirLocal),-1,1)))
+  const deltaDeg = state.dragPrevDirLocal
+    ? radToDeg(Math.acos(THREE.MathUtils.clamp(state.dragPrevDirLocal.dot(newDirLocal),-1,1)))
     : 0;
   const tag = deltaDeg>5 ? "jump" : "move";
-  const parentDet=dragInfo.parent.matrixWorld.determinant();
-  logDragDebug(tag,{
-    boneName:dragBone.name||"(no name)",
-    restDir:dragInfo.restDirLocal,
+  const parentDet=state.dragInfo.parent.matrixWorld.determinant();
+  logDragDebug(state,tag,{
+    boneName:state.dragBone.name||"(no name)",
+    restDir:state.dragInfo.restDirLocal,
     newDir:newDirLocal,
     qDelta:qDeltaLocal,
-    parentQ:dragInfo.parent.quaternion,
-    parentWQ:dragInfo.parentRestWorldQ,
-    parentScale:dragInfo.parentRestScale,
+    parentQ:state.dragInfo.parent.quaternion,
+    parentWQ:state.dragInfo.parentRestWorldQ,
+    parentScale:state.dragInfo.parentRestScale,
     parentDet,
-    dot:dragInfo.restDirLocal.dot(newDirLocal),
+    dot:state.dragInfo.restDirLocal.dot(newDirLocal),
     len:lenLocal,
     deltaDeg,
     targetW:hit,
-    planeN:dragPlane.normal,
-    offsetLen:dragOffsetWorld.length(),
+    planeN:state.dragPlane.normal,
+    offsetLen:state.dragOffsetWorld.length(),
     dirW:newDirWorld,
     dirWRaw:newDirWorldRaw
   });
-  dragPrevDirLocal=newDirLocal.clone();
+  state.dragPrevDirLocal=newDirLocal.clone();
 }
 
-function endDrag(ev){
-  canvas.releasePointerCapture?.(ev.pointerId);
-  controls.enabled=true;
-  canvas.classList.remove('cursor-move');
+function endDragById(pointerId){
+  const state=activeDrags.get(pointerId);
+  if(!state) return;
+  canvas.releasePointerCapture?.(pointerId);
 
   // 1操作のスナップショット（after）→ Undo スタックへ
-  if(currentAction){
-    currentAction.after = poseSnapshot();
-    pushAction(currentAction);
-    currentAction=null;
+  if(state.currentAction){
+    state.currentAction.after = poseSnapshot();
+    pushAction(state.currentAction);
+    state.currentAction=null;
   }
 
-  logDragDebug("end",{
-    boneName:dragBone?.name||"(no name)",
-    parentQ:dragInfo?.parent?.quaternion,
-    restDir:dragInfo?.restDirLocal
+  logDragDebug(state,"end",{
+    boneName:state.dragBone?.name||"(no name)",
+    parentQ:state.dragInfo?.parent?.quaternion,
+    restDir:state.dragInfo?.restDirLocal
   });
-  dragBone=null; dragPlane=null; dragOffsetWorld=null; dragInfo=null; dragPrevDirLocal=null;
+  activeDrags.delete(pointerId);
+  if(activeDrags.size===0){
+    controls.enabled=true;
+    canvas.classList.remove('cursor-move');
+  }
 }
 
 /* ===== 入力（マウス） ===== */
+canvas.addEventListener("pointerdown", maybeEnableTwoFingerCamera, { capture:true });
 canvas.addEventListener("pointerdown",(e)=>{
   if(e.button!==0) return;
-  const pick=pickBoneByRay(e); if(!pick) return;
+  if(e.pointerType==="touch"){
+    activeTouchIds.add(e.pointerId);
+    if(twoFingerMode===TWO_FINGER_CAMERA && activeTouchIds.size>=2){
+      // 2本指はカメラ操作に譲る
+      for(const [id,state] of activeDrags){
+        if(state.pointerType==="touch") endDragById(id);
+      }
+      return;
+    }
+  }
+  const pick=pickBoneByRay(e);
+  if(!pick){
+    if(
+      e.pointerType==="touch" &&
+      twoFingerMode===TWO_FINGER_BONE &&
+      activeTouchIds.size>=2 &&
+      countTouchDrags()===0
+    ){
+      twoFingerCameraOverride=true;
+      syncTwoFingerControls();
+    }
+    return;
+  }
   e.preventDefault(); e.stopPropagation();
   pickPixelRadius = e.pointerType==="touch"? PICK_RADIUS_TOUCH : PICK_RADIUS_MOUSE;
   pickerUpdate();
-  if(beginDrag(e,pick)) isLeftDragging=true;
+  const state=beginDrag(e,pick);
+  if(state){
+    activeDrags.set(e.pointerId,state);
+    if(e.pointerType==="touch" && twoFingerCameraOverride){
+      twoFingerCameraOverride=false;
+      syncTwoFingerControls();
+    }
+  }
 });
-canvas.addEventListener("pointermove",(e)=>{ if(isLeftDragging){ e.preventDefault(); dragMove(e); } });
-canvas.addEventListener("pointerup",(e)=>{ if(isLeftDragging){ isLeftDragging=false; endDrag(e); } });
-canvas.addEventListener("pointercancel",(e)=>{ if(isLeftDragging){ isLeftDragging=false; endDrag(e); } });
+canvas.addEventListener("pointermove",(e)=>{
+  const state=activeDrags.get(e.pointerId);
+  if(state){
+    e.preventDefault();
+    dragMove(e,state);
+  }
+});
+canvas.addEventListener("pointerup",(e)=>{
+  if(e.pointerType==="touch") activeTouchIds.delete(e.pointerId);
+  endDragById(e.pointerId);
+  if(e.pointerType==="touch" && activeTouchIds.size<2 && twoFingerCameraOverride){
+    twoFingerCameraOverride=false;
+    syncTwoFingerControls();
+  }
+});
+canvas.addEventListener("pointercancel",(e)=>{
+  if(e.pointerType==="touch") activeTouchIds.delete(e.pointerId);
+  endDragById(e.pointerId);
+  if(e.pointerType==="touch" && activeTouchIds.size<2 && twoFingerCameraOverride){
+    twoFingerCameraOverride=false;
+    syncTwoFingerControls();
+  }
+});
 
 /* ===== ショートカット / ボタン ===== */
 window.addEventListener("keydown",(e)=>{
@@ -748,6 +850,13 @@ btnAxisX.addEventListener("click",()=>toggleAxis("x"));
 btnAxisY.addEventListener("click",()=>toggleAxis("y"));
 btnAxisZ.addEventListener("click",()=>toggleAxis("z"));
 btnTogglePanel.addEventListener("click",()=>setPanelVisible(!panelVisible));
+twoFingerModeSelect.addEventListener("change",()=>{
+  twoFingerMode=twoFingerModeSelect.value===TWO_FINGER_BONE? TWO_FINGER_BONE : TWO_FINGER_CAMERA;
+  twoFingerCameraOverride=false;
+  syncTwoFingerControls();
+  log(`二本指操作: ${twoFingerMode===TWO_FINGER_CAMERA?"カメラ":"ボーン"}`);
+});
+syncTwoFingerControls();
 gyroGainSelect.addEventListener("change",()=>{
   syncGyroGain();
   log(`ジャイロ感度: x${gyroGain.toFixed(2)}`);
