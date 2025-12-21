@@ -52,7 +52,7 @@
     <div class="header-row actions">
       <button id="btnUndo" disabled>元に戻す</button>
       <button id="btnRedo" disabled>やり直す</button>
-      <button id="btnGyro">ジャイロ開始 V0.1.10</button>
+      <button id="btnGyro">ジャイロ開始 V0.1.11</button>
       <button id="btnGyroTarget" class="toggle-btn" aria-pressed="false" title="ジャイロをどこにかけるか（ワールド/モデル内ルート）を切り替え">ジャイロ:ワールド</button>
       <button id="btnAxisX" class="toggle-btn" aria-pressed="true" title="X軸の反映 ON/OFF">X軸</button>
       <button id="btnAxisY" class="toggle-btn" aria-pressed="true" title="Y軸の反映 ON/OFF">Y軸</button>
@@ -417,6 +417,7 @@ let dragPrevDirLocal=null;
 let dragStartDirLocal=new THREE.Vector3();
 let dragParentStartLocalQ=new THREE.Quaternion();
 const tmpV=new THREE.Vector3(), pw=new THREE.Vector3(), tmpA=new THREE.Vector3(), tmpB=new THREE.Vector3();
+const tmpP0=new THREE.Vector3(), tmpP1=new THREE.Vector3(), tmpCam=new THREE.Vector3();
 const tmpQ=new THREE.Quaternion();
 const tmpScale=new THREE.Vector3();
 const tmpQWorld=new THREE.Quaternion();
@@ -492,6 +493,7 @@ function pointSegmentDistSq2D(px,py,ax,ay,bx,by){
 function pickBoneByRay(ev){
   if(!bones.length) return null;
   const radius=ev.pointerType==="touch"? PICK_RADIUS_TOUCH : PICK_RADIUS_MOUSE;
+  const tieScreenSq=1; // スクリーン距離がほぼ同じなら深度を優先
 
   setMouseNDC(ev);
   raycaster.setFromCamera(mouseNDC,camera);
@@ -504,25 +506,31 @@ function pickBoneByRay(ev){
   // フォールバック：線分（ボーン→子ボーン）をスクリーン座標で当たり判定し、「線分元のボーン」を返す
   const rect=renderer.domElement.getBoundingClientRect();
   const mx=ev.clientX-rect.left, my=ev.clientY-rect.top;
-  let bestBone=null, bestDistSq=Infinity, bestT=0;
+  const camPos=camera.getWorldPosition(tmpCam);
+  let bestBone=null, bestDistSq=Infinity, bestDepthSq=Infinity, bestT=0;
 
   bones.forEach(bone=>{
     // 親がボーンでない場合は回転対象にならないのでスキップ
     if(!bone.parent || !bone.parent.isBone) return;
 
+    const boneWorld=bone.getWorldPosition(tmpA);
+    const depthSq=camPos.distanceToSquared(boneWorld);
+    const p0=tmpP0.copy(boneWorld).project(camera);
     let hasChildSegment=false;
     bone.children.forEach(ch=>{
       if(!ch.isBone) return;
       hasChildSegment=true;
 
-      const p0=tmpA.copy(bone.getWorldPosition(tmpA)).project(camera);
-      const p1=tmpB.copy(ch.getWorldPosition(tmpB)).project(camera);
+      const p1=tmpP1.copy(ch.getWorldPosition(tmpB)).project(camera);
       const x0=(p0.x*0.5+0.5)*rect.width, y0=(-p0.y*0.5+0.5)*rect.height;
       const x1=(p1.x*0.5+0.5)*rect.width, y1=(-p1.y*0.5+0.5)*rect.height;
 
       const {distSq, t}=pointSegmentDistSq2D(mx,my,x0,y0,x1,y1);
-      if(distSq<bestDistSq){
+      const screenBetter = distSq + tieScreenSq < bestDistSq;
+      const nearSameScreen=Math.abs(distSq-bestDistSq)<=tieScreenSq;
+      if(screenBetter || (nearSameScreen && depthSq<bestDepthSq)){
         bestDistSq=distSq;
+        bestDepthSq=depthSq;
         bestBone=bone;
         bestT=t;
       }
@@ -530,11 +538,13 @@ function pickBoneByRay(ev){
 
     // 子ボーンが無い場合は点距離で判定（ほぼ picker と同様の意味合い）
     if(!hasChildSegment){
-      const p0=tmpA.copy(bone.getWorldPosition(tmpA)).project(camera);
       const x0=(p0.x*0.5+0.5)*rect.width, y0=(-p0.y*0.5+0.5)*rect.height;
       const distSq=(mx-x0)*(mx-x0)+(my-y0)*(my-y0);
-      if(distSq<bestDistSq){
+      const screenBetter = distSq + tieScreenSq < bestDistSq;
+      const nearSameScreen=Math.abs(distSq-bestDistSq)<=tieScreenSq;
+      if(screenBetter || (nearSameScreen && depthSq<bestDepthSq)){
         bestDistSq=distSq;
+        bestDepthSq=depthSq;
         bestBone=bone;
         bestT=0;
       }
